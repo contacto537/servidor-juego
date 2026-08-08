@@ -3,7 +3,7 @@ const {Server}=require("socket.io");
 const ADMIN_KEY="vikingo537";
 const HISTORY=[];
 function hist(action,name,room){
-const h={t:new Date().toISOString(),action,name,room:room||""};
+const h={t:new Date().toISOString(),action,name,room:room||""}; 
 HISTORY.push(h);
 if(HISTORY.length>1000)HISTORY.shift();
 console.log(h.t,action.toUpperCase(),name,h.room?("room "+h.room):"");
