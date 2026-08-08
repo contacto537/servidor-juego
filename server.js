@@ -36,8 +36,11 @@ for(let i=0;i<4;i++)c+=ABC[Math.floor(Math.random()*ABC.length)];
 }while(rooms[c]);
 return c;
 }
+function pmap(r){
+return r.players.map(p=>({idx:p.idx,name:p.name,cos:p.cos||null}));
+}
 function lobby(r){
-return{code:r.code,players:r.players.map(p=>({idx:p.idx,name:p.name})),started:r.started};
+return{code:r.code,players:pmap(r),started:r.started,mode:r.mode||"ffa"};
 }
 function finalize(room,pl){
 if(!rooms[room.code])return;
@@ -60,10 +63,15 @@ delete rooms[room.code];
 return;
 }
 io.to(room.code).emit("lobby",lobby(room));
+io.to(room.code).emit("left",{name:pl.name});
 io.to(room.hostId).emit("peerLeft",{idx:pl.idx});
-if(room.started&&room.players.length&&room.players.every(p=>p.again)){
+if(room.started){
+const a=room.players.filter(p=>p.again).length;
+io.to(room.code).emit("againCount",a,room.players.length);
+if(room.players.length&&room.players.every(p=>p.again)){
 room.players.forEach(p=>p.again=false);
-io.to(room.code).emit("restart",{players:room.players.map(p=>({idx:p.idx,name:p.name}))});
+io.to(room.code).emit("restart",{players:pmap(room),mode:room.mode||"ffa"});
+}
 }
 }
 io.on("connection",sock=>{
@@ -72,10 +80,11 @@ let player=null;
 let me=null;
 sock.on("hello",(raw,cb)=>{
 if(typeof cb!=="function")return;
-let n,sid;
+let n,sid,cos=null;
 if(raw&&typeof raw==="object"){
 n=raw.name;
 sid=String(raw.sid||"").replace(/[^\w-]/g,"").slice(0,24);
+if(raw.cos&&typeof raw.cos==="object")cos={s:raw.cos.s?1:0,w:raw.cos.w?1:0,g:raw.cos.g?1:0};
 }else{
 n=raw;
 sid="";
@@ -84,7 +93,7 @@ n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice
 if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
 if(names.has(n.toLowerCase()))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
-me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20))};
+me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20)),cos};
 hist("hello",n);
 cb({ok:true,name:n});
 });
@@ -93,8 +102,8 @@ if(typeof cb!=="function")return;
 if(!me)return cb({ok:false,err:"Pick a nickname first"});
 if(room)return cb({ok:false,err:"You are already in a room"});
 const c=makeCode();
-player={id:sock.id,idx:0,name:me.name,sid:me.sid,again:false,ghost:false,tm:null};
-room=rooms[c]={code:c,hostId:sock.id,players:[player],started:false};
+player={id:sock.id,idx:0,name:me.name,sid:me.sid,cos:me.cos,again:false,ghost:false,tm:null};
+room=rooms[c]={code:c,hostId:sock.id,players:[player],started:false,mode:"ffa"};
 sessions[me.sid]={code:c,idx:0};
 sock.join(c);
 hist("create",me.name,c);
@@ -109,11 +118,11 @@ c=String(c||"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4);
 const r=rooms[c];
 if(!r)return cb({ok:false,err:"That room does not exist"});
 if(r.started)return cb({ok:false,err:"The match already started"});
-if(r.players.length>=4)return cb({ok:false,err:"Room is full (max 4)"});
+if(r.players.length>=8)return cb({ok:false,err:"Room is full (max 8)"});
 const used=r.players.map(p=>p.idx);
 let idx=0;
 while(used.includes(idx))idx++;
-player={id:sock.id,idx,name:me.name,sid:me.sid,again:false,ghost:false,tm:null};
+player={id:sock.id,idx,name:me.name,sid:me.sid,cos:me.cos,again:false,ghost:false,tm:null};
 room=r;
 r.players.push(player);
 sessions[me.sid]={code:c,idx};
@@ -142,11 +151,17 @@ hist("rejoin",me.name,r.code);
 cb({ok:true,code:r.code,idx:pl.idx,host:pl.idx===0,started:r.started});
 io.to(r.code).emit("lobby",lobby(r));
 });
+sock.on("mode",m=>{
+if(!room||room.hostId!==sock.id||room.started)return;
+if(m!=="ffa"&&m!=="surv")return;
+room.mode=m;
+io.to(room.code).emit("lobby",lobby(room));
+});
 sock.on("start",()=>{
 if(!room||room.hostId!==sock.id||room.players.length<2)return;
 room.started=true;
 room.players.forEach(p=>p.again=false);
-io.to(room.code).emit("start",{players:room.players.map(p=>({idx:p.idx,name:p.name}))});
+io.to(room.code).emit("start",{players:pmap(room),mode:room.mode||"ffa"});
 });
 sock.on("input",d=>{
 if(!room||!player||!room.started)return;
@@ -168,7 +183,7 @@ const a=room.players.filter(p2=>p2.again).length;
 io.to(room.code).emit("againCount",a,room.players.length);
 if(room.players.every(p2=>p2.again)){
 room.players.forEach(p2=>p2.again=false);
-io.to(room.code).emit("restart",{players:room.players.map(p2=>({idx:p2.idx,name:p2.name}))});
+io.to(room.code).emit("restart",{players:pmap(room),mode:room.mode||"ffa"});
 }
 });
 sock.on("leave",()=>{
