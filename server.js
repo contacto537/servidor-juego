@@ -1,6 +1,25 @@
 const http=require("http");
 const {Server}=require("socket.io");
+const ADMIN_KEY="vikingo537";
+const HISTORY=[];
+function hist(action,name,room){
+const h={t:new Date().toISOString(),action,name,room:room||""};
+HISTORY.push(h);
+if(HISTORY.length>1000)HISTORY.shift();
+console.log(h.t,action.toUpperCase(),name,h.room?("room "+h.room):"");
+}
 const srv=http.createServer((req,res)=>{
+const u=new URL(req.url,"http://x");
+if(u.pathname==="/names"){
+if(u.searchParams.get("key")!==ADMIN_KEY){
+res.writeHead(403,{"Content-Type":"text/plain; charset=utf-8"});
+res.end("Forbidden");
+return;
+}
+res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
+res.end(HISTORY.length?HISTORY.map(h=>h.t+"  "+h.action.toUpperCase().padEnd(7)+"  "+h.name+(h.room?"  ["+h.room+"]":"")).join("\n"):"(no players yet since the last server restart)");
+return;
+}
 res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
 res.end("Water Escape server OK");
 });
@@ -33,6 +52,7 @@ if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
 if(names.has(n.toLowerCase()))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
 me={name:n};
+hist("hello",n);
 cb({ok:true,name:n});
 });
 sock.on("create",cb=>{
@@ -42,6 +62,7 @@ if(room)return cb({ok:false,err:"You are already in a room"});
 const c=makeCode();
 room=rooms[c]={code:c,hostId:sock.id,players:[{id:sock.id,idx:0,name:me.name,again:false}],started:false};
 sock.join(c);
+hist("create",me.name,c);
 cb({ok:true,code:c,idx:0});
 io.to(c).emit("lobby",lobby(room));
 });
@@ -60,6 +81,7 @@ while(used.includes(idx))idx++;
 room=r;
 r.players.push({id:sock.id,idx,name:me.name,again:false});
 sock.join(c);
+hist("join",me.name,c);
 cb({ok:true,code:c,idx});
 io.to(c).emit("lobby",lobby(r));
 });
