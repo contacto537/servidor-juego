@@ -1,28 +1,93 @@
 const http=require("http");
 const {Server}=require("socket.io");
-const ADMIN_KEY="vikingo537";
+const ADMIN_KEY=process.env.ADMIN_KEY||"vikingo537";
+const SUPABASE_URL=process.env.SUPABASE_URL||"";
+const SUPABASE_KEY=process.env.SUPABASE_KEY||"";
+const DB_ON=!!(SUPABASE_URL&&SUPABASE_KEY);
 const HISTORY=[];
+async function dbInsert(row){
+if(!DB_ON)return;
+try{
+await fetch(SUPABASE_URL+"/rest/v1/plays",{
+method:"POST",
+headers:{
+"apikey":SUPABASE_KEY,
+"Authorization":"Bearer "+SUPABASE_KEY,
+"Content-Type":"application/json",
+"Prefer":"return=minimal"
+},
+body:JSON.stringify(row)
+});
+}catch(e){console.log("DB insert error:",e.message)}
+}
+async function dbFetch(){
+if(!DB_ON)return null;
+try{
+const r=await fetch(SUPABASE_URL+"/rest/v1/plays?select=*&order=t.desc&limit=2000",{
+headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY}
+});
+if(!r.ok)return null;
+return await r.json();
+}catch(e){console.log("DB fetch error:",e.message);return null}
+}
 function hist(action,name,room){
 const h={t:new Date().toISOString(),action,name,room:room||""};
 HISTORY.push(h);
 if(HISTORY.length>1000)HISTORY.shift();
 console.log(h.t,action.toUpperCase(),name,h.room?("room "+h.room):"");
+dbInsert(h);
 }
-const srv=http.createServer((req,res)=>{
+const srv=http.createServer(async(req,res)=>{
 const u=new URL(req.url,"http://x");
-if(u.pathname==="/names"){
+if(u.pathname==="/names"||u.pathname==="/stats"){
 if(u.searchParams.get("key")!==ADMIN_KEY){
 res.writeHead(403,{"Content-Type":"text/plain; charset=utf-8"});
 res.end("Forbidden");
 return;
 }
+let rows=await dbFetch();
+const persisted=rows!==null;
+if(!persisted)rows=HISTORY.slice();
+rows.sort((a,b)=>String(b.t).localeCompare(String(a.t)));
+const uniq=new Map();
+let creates=0,joins=0;
+for(const h of rows){
+const key=String(h.name||"").toLowerCase();
+if(!uniq.has(key))uniq.set(key,{name:h.name,first:h.t,last:h.t,plays:0});
+const u2=uniq.get(key);
+if(String(h.t)<u2.first)u2.first=h.t;
+if(String(h.t)>u2.last)u2.last=h.t;
+if(h.action==="hello"||h.action==="create"||h.action==="join")u2.plays++;
+if(h.action==="create")creates++;
+if(h.action==="join")joins++;
+}
+const players=[...uniq.values()].sort((a,b)=>String(b.last).localeCompare(String(a.last)));
+if(u.pathname==="/stats"){
+res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});
+let html='<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Water Escape · Players</title>';
+html+='<style>body{background:#0a0716;color:#eafaff;font-family:monospace;padding:20px;max-width:900px;margin:0 auto}h1{color:#5fe6ff}.s{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}.c{background:#161b24;border:2px solid #2a5a86;border-radius:8px;padding:12px 18px}.c b{color:#ffd23f;font-size:22px;display:block}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{text-align:left;padding:8px;border-bottom:1px solid #223}th{color:#8fe0f5}tr:hover{background:#111a2b}.tag{color:#37e08a}.warn{color:#ff8c6a;font-size:13px}</style>';
+html+='<h1>🎮 Water Escape — Players</h1>';
+if(!persisted)html+='<p class="warn">⚠ Showing in-memory data only (resets when the server restarts). Configure Supabase for permanent history.</p>';
+else html+='<p class="tag">✓ Persistent history (survives restarts)</p>';
+html+='<div class="s"><div class="c"><b>'+uniq.size+'</b>unique players</div><div class="c"><b>'+rows.length+'</b>total events</div><div class="c"><b>'+creates+'</b>rooms created</div><div class="c"><b>'+joins+'</b>joins</div></div>';
+html+='<table><tr><th>Nickname</th><th>Times played</th><th>First seen</th><th>Last seen</th></tr>';
+for(const p of players){
+const f=new Date(p.first).toLocaleString();
+const l=new Date(p.last).toLocaleString();
+html+='<tr><td>'+esc(p.name)+'</td><td>'+p.plays+'</td><td>'+f+'</td><td>'+l+'</td></tr>';
+}
+html+='</table>';
+res.end(html);
+return;
+}
 res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
-res.end(HISTORY.length?HISTORY.map(h=>h.t+"  "+h.action.toUpperCase().padEnd(7)+"  "+h.name+(h.room?"  ["+h.room+"]":"")).join("\n"):"(no players yet since the last server restart)");
+res.end(rows.length?rows.map(h=>h.t+"  "+String(h.action).toUpperCase().padEnd(7)+"  "+h.name+(h.room?"  ["+h.room+"]":"")).join("\n"):"(no players logged yet)");
 return;
 }
 res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
 res.end("Water Escape server OK");
 });
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 const io=new Server(srv,{cors:{origin:"*"}});
 const rooms={};
 const names=new Set();
