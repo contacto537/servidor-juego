@@ -3,7 +3,7 @@ const {Server}=require("socket.io");
 const ADMIN_KEY="vikingo537";
 const HISTORY=[];
 function hist(action,name,room){
-const h={t:new Date().toISOString(),action,name,room:room||""}; 
+const h={t:new Date().toISOString(),action,name,room:room||""};
 HISTORY.push(h);
 if(HISTORY.length>1000)HISTORY.shift();
 console.log(h.t,action.toUpperCase(),name,h.room?("room "+h.room):"");
@@ -170,6 +170,12 @@ const dx=Math.max(-1,Math.min(1,d[0]|0));
 const dy=Math.max(-1,Math.min(1,d[1]|0));
 if(Math.abs(dx)+Math.abs(dy)!==1)return;
 io.to(room.hostId).emit("input",{idx:player.idx,d:[dx,dy]});
+});
+sock.on("tp",d=>{
+if(!room||!player||!room.started)return;
+if(!Array.isArray(d)||d.length!==2)return;
+const tc=d[0]|0,tr=d[1]|0;
+io.to(room.hostId).emit("tp",{idx:player.idx,d:[tc,tr]});
 });
 sock.on("state",s=>{
 if(!room||room.hostId!==sock.id)return;
