@@ -26,6 +26,7 @@ res.end("Water Escape server OK");
 const io=new Server(srv,{cors:{origin:"*"}});
 const rooms={};
 const names=new Set();
+const sessions={};
 const ABC="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function makeCode(){
 let c="";
@@ -38,20 +39,52 @@ return c;
 function lobby(r){
 return{code:r.code,players:r.players.map(p=>({idx:p.idx,name:p.name})),started:r.started};
 }
-function idxOf(r,id){
-const p=r.players.find(p2=>p2.id===id);
-return p?p.idx:-1;
+function finalize(room,pl){
+if(!rooms[room.code])return;
+if(pl.tm){clearTimeout(pl.tm);pl.tm=null}
+if(!room.players.includes(pl))return;
+const wasHost=pl.idx===0;
+room.players=room.players.filter(p=>p!==pl);
+if(sessions[pl.sid]&&sessions[pl.sid].code===room.code)delete sessions[pl.sid];
+if(!room.players.length){
+delete rooms[room.code];
+return;
+}
+if(wasHost){
+io.to(room.code).emit("hostLeft");
+for(const p of room.players){
+if(sessions[p.sid]&&sessions[p.sid].code===room.code)delete sessions[p.sid];
+if(p.tm){clearTimeout(p.tm);p.tm=null}
+}
+delete rooms[room.code];
+return;
+}
+io.to(room.code).emit("lobby",lobby(room));
+io.to(room.hostId).emit("peerLeft",{idx:pl.idx});
+if(room.started&&room.players.length&&room.players.every(p=>p.again)){
+room.players.forEach(p=>p.again=false);
+io.to(room.code).emit("restart",{players:room.players.map(p=>({idx:p.idx,name:p.name}))});
+}
 }
 io.on("connection",sock=>{
 let room=null;
+let player=null;
 let me=null;
-sock.on("hello",(n,cb)=>{
+sock.on("hello",(raw,cb)=>{
 if(typeof cb!=="function")return;
+let n,sid;
+if(raw&&typeof raw==="object"){
+n=raw.name;
+sid=String(raw.sid||"").replace(/[^\w-]/g,"").slice(0,24);
+}else{
+n=raw;
+sid="";
+}
 n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice(0,12);
 if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
 if(names.has(n.toLowerCase()))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
-me={name:n};
+me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20))};
 hist("hello",n);
 cb({ok:true,name:n});
 });
@@ -60,7 +93,9 @@ if(typeof cb!=="function")return;
 if(!me)return cb({ok:false,err:"Pick a nickname first"});
 if(room)return cb({ok:false,err:"You are already in a room"});
 const c=makeCode();
-room=rooms[c]={code:c,hostId:sock.id,players:[{id:sock.id,idx:0,name:me.name,again:false}],started:false};
+player={id:sock.id,idx:0,name:me.name,sid:me.sid,again:false,ghost:false,tm:null};
+room=rooms[c]={code:c,hostId:sock.id,players:[player],started:false};
+sessions[me.sid]={code:c,idx:0};
 sock.join(c);
 hist("create",me.name,c);
 cb({ok:true,code:c,idx:0});
@@ -78,12 +113,34 @@ if(r.players.length>=4)return cb({ok:false,err:"Room is full (max 4)"});
 const used=r.players.map(p=>p.idx);
 let idx=0;
 while(used.includes(idx))idx++;
+player={id:sock.id,idx,name:me.name,sid:me.sid,again:false,ghost:false,tm:null};
 room=r;
-r.players.push({id:sock.id,idx,name:me.name,again:false});
+r.players.push(player);
+sessions[me.sid]={code:c,idx};
 sock.join(c);
 hist("join",me.name,c);
 cb({ok:true,code:c,idx});
 io.to(c).emit("lobby",lobby(r));
+});
+sock.on("rejoin",cb=>{
+if(typeof cb!=="function")return;
+if(!me)return cb({ok:false});
+const ses=sessions[me.sid];
+if(!ses)return cb({ok:false});
+const r=rooms[ses.code];
+if(!r)return cb({ok:false});
+const pl=r.players.find(p=>p.sid===me.sid&&p.idx===ses.idx);
+if(!pl)return cb({ok:false});
+if(pl.tm){clearTimeout(pl.tm);pl.tm=null}
+pl.ghost=false;
+pl.id=sock.id;
+if(pl.idx===0)r.hostId=sock.id;
+room=r;
+player=pl;
+sock.join(r.code);
+hist("rejoin",me.name,r.code);
+cb({ok:true,code:r.code,idx:pl.idx,host:pl.idx===0,started:r.started});
+io.to(r.code).emit("lobby",lobby(r));
 });
 sock.on("start",()=>{
 if(!room||room.hostId!==sock.id||room.players.length<2)return;
@@ -92,22 +149,21 @@ room.players.forEach(p=>p.again=false);
 io.to(room.code).emit("start",{players:room.players.map(p=>({idx:p.idx,name:p.name}))});
 });
 sock.on("input",d=>{
-if(!room||!room.started)return;
+if(!room||!player||!room.started)return;
 if(!Array.isArray(d)||d.length!==2)return;
 const dx=Math.max(-1,Math.min(1,d[0]|0));
 const dy=Math.max(-1,Math.min(1,d[1]|0));
 if(Math.abs(dx)+Math.abs(dy)!==1)return;
-io.to(room.hostId).emit("input",{idx:idxOf(room,sock.id),d:[dx,dy]});
+io.to(room.hostId).emit("input",{idx:player.idx,d:[dx,dy]});
 });
 sock.on("state",s=>{
 if(!room||room.hostId!==sock.id)return;
 sock.to(room.code).emit("state",s);
 });
 sock.on("again",()=>{
-if(!room||!room.started)return;
-const p=room.players.find(p2=>p2.id===sock.id);
-if(!p||p.again)return;
-p.again=true;
+if(!room||!player||!room.started)return;
+if(player.again)return;
+player.again=true;
 const a=room.players.filter(p2=>p2.again).length;
 io.to(room.code).emit("againCount",a,room.players.length);
 if(room.players.every(p2=>p2.again)){
@@ -115,28 +171,23 @@ room.players.forEach(p2=>p2.again=false);
 io.to(room.code).emit("restart",{players:room.players.map(p2=>({idx:p2.idx,name:p2.name}))});
 }
 });
+sock.on("leave",()=>{
+if(!room||!player)return;
+const r=room,pl=player;
+room=null;
+player=null;
+finalize(r,pl);
+});
 sock.on("disconnect",()=>{
 if(me)names.delete(me.name.toLowerCase());
-if(!room)return;
-const wasHost=room.hostId===sock.id;
-room.players=room.players.filter(p=>p.id!==sock.id);
-if(!room.players.length){
-delete rooms[room.code];
+if(!room||!player)return;
+const r=room,pl=player;
 room=null;
-return;
-}
-if(wasHost){
-io.to(room.code).emit("hostLeft");
-delete rooms[room.code];
-}else{
-io.to(room.code).emit("lobby",lobby(room));
-io.to(room.hostId).emit("peerLeft",{});
-if(room.started&&room.players.every(p=>p.again)){
-room.players.forEach(p=>p.again=false);
-io.to(room.code).emit("restart",{players:room.players.map(p=>({idx:p.idx,name:p.name}))});
-}
-}
-room=null;
+player=null;
+pl.ghost=true;
+pl.tm=setTimeout(()=>{
+if(pl.ghost)finalize(r,pl);
+},9000);
 });
 });
 const PORT=process.env.PORT||3000;
