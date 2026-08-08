@@ -91,7 +91,7 @@ sid="";
 }
 n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice(0,12);
 if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
-if(names.has(n.toLowerCase()))return cb({ok:false,err:"That nickname is already taken"});
+if(names.has(n.toLowerCase())&&!(sid&&sessions[sid]))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
 me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20)),cos};
 hist("hello",n);
@@ -202,7 +202,7 @@ player=null;
 pl.ghost=true;
 pl.tm=setTimeout(()=>{
 if(pl.ghost)finalize(r,pl);
-},9000);
+},r.started?15000:120000);
 });
 });
 const PORT=process.env.PORT||3000;
