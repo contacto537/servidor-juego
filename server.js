@@ -157,16 +157,19 @@ const wasHost=pl.idx===0;
 room.players=room.players.filter(p=>p!==pl);
 if(sessions[pl.sid]&&sessions[pl.sid].code===room.code)delete sessions[pl.sid];
 if(!room.players.length){
+if(room.graceUntil&&Date.now()<room.graceUntil){
+return;
+}
 delete rooms[room.code];
 return;
 }
 if(wasHost){
-io.to(room.code).emit("hostLeft");
-for(const p of room.players){
-if(sessions[p.sid]&&sessions[p.sid].code===room.code)delete sessions[p.sid];
-if(p.tm){clearTimeout(p.tm);p.tm=null}
-}
-delete rooms[room.code];
+const next=room.players[0];
+next.idx=0;
+room.hostId=next.id;
+sessions[next.sid]={code:room.code,idx:0};
+io.to(room.code).emit("lobby",lobby(room));
+io.to(room.code).emit("left",{name:pl.name});
 return;
 }
 io.to(room.code).emit("lobby",lobby(room));
@@ -325,9 +328,10 @@ const r=room,pl=player;
 room=null;
 player=null;
 pl.ghost=true;
+r.graceUntil=Date.now()+60000;
 pl.tm=setTimeout(()=>{
 if(pl.ghost)finalize(r,pl);
-},r.started?15000:120000);
+},60000);
 });
 });
 const PORT=process.env.PORT||3000;
