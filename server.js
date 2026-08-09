@@ -284,6 +284,15 @@ if(!Array.isArray(d)||d.length!==2)return;
 const tc=d[0]|0,tr=d[1]|0;
 io.to(room.hostId).emit("tp",{idx:player.idx,d:[tc,tr]});
 });
+sock.on("aim",d=>{
+if(!room||!player||!room.started)return;
+const dir=(d|0)<0?-1:1;
+io.to(room.hostId).emit("aim",{idx:player.idx,d:dir});
+});
+sock.on("throw",d=>{
+if(!room||!player||!room.started)return;
+io.to(room.hostId).emit("throw",{idx:player.idx,d:d|0});
+});
 sock.on("state",s=>{
 if(!room||room.hostId!==sock.id)return;
 sock.to(room.code).emit("state",s);
