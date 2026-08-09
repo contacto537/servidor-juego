@@ -51,8 +51,14 @@ if(!DB_ON)return null;
 try{
 const data=await httpsReq("GET","/rest/v1/plays?select=*&order=t.desc&limit=2000",null);
 DB_OK_ONCE=true;
+try{
+const parsed=JSON.parse(data);
 DB_LAST_ERR="";
-return JSON.parse(data);
+return parsed;
+}catch(pe){
+DB_LAST_ERR="Response was not JSON. Got: "+String(data).slice(0,120)+" — this usually means the URL is wrong (not pointing to Supabase) or the table 'plays' does not exist.";
+return null;
+}
 }catch(e){DB_LAST_ERR=e.message;console.log("DB fetch error:",e.message);return null}
 }
 function hist(action,name,room){
@@ -96,6 +102,8 @@ html+='<div style="background:#0d1420;border:1px solid #223;border-radius:8px;pa
 html+='<b style="color:#8fe0f5">Diagnostic:</b><br>';
 html+='Node version: '+esc(process.version)+'<br>';
 html+='SUPABASE_URL configured: '+(SUPABASE_URL?'<span class=tag>yes</span>':'<span class=warn>NO — missing</span>')+'<br>';
+html+='URL host: <span class=tag>'+esc((()=>{try{return new URL(SUPABASE_URL).hostname}catch(e){return"(invalid URL)"}})())+'</span><br>';
+html+='URL looks like Supabase: '+((/supabase\.(co|in|com)$/i.test((()=>{try{return new URL(SUPABASE_URL).hostname}catch(e){return""}})()))?'<span class=tag>yes ✓</span>':'<span class=warn>NO — should end in .supabase.co</span>')+'<br>';
 html+='SUPABASE_KEY configured: '+(SUPABASE_KEY?('<span class=tag>yes (length '+SUPABASE_KEY.length+')</span>'):'<span class=warn>NO — missing</span>')+'<br>';
 html+='Database mode: '+(DB_ON?'<span class=tag>ON</span>':'<span class=warn>OFF</span>')+'<br>';
 html+='Connection test: '+(DB_OK_ONCE?'<span class=tag>✓ connected successfully</span>':(DB_ON?'<span class=warn>✗ failed</span>':'not attempted (no keys)'))+'<br>';
