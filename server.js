@@ -1,34 +1,59 @@
 const http=require("http");
 const {Server}=require("socket.io");
 const ADMIN_KEY=process.env.ADMIN_KEY||"vikingo537";
-const SUPABASE_URL=process.env.SUPABASE_URL||"";
-const SUPABASE_KEY=process.env.SUPABASE_KEY||"";
+const https=require("https");
+const SUPABASE_URL=(process.env.SUPABASE_URL||"").trim().replace(/\/$/,"");
+const SUPABASE_KEY=(process.env.SUPABASE_KEY||"").trim();
 const DB_ON=!!(SUPABASE_URL&&SUPABASE_KEY);
+let DB_LAST_ERR="";
+let DB_OK_ONCE=false;
 const HISTORY=[];
+console.log("=== Water Escape server starting ===");
+console.log("Node version:",process.version);
+console.log("SUPABASE_URL set:",SUPABASE_URL?("yes ("+SUPABASE_URL.slice(0,28)+"...)"):"NO");
+console.log("SUPABASE_KEY set:",SUPABASE_KEY?("yes, length "+SUPABASE_KEY.length):"NO");
+console.log("Database mode:",DB_ON?"ON (persistent)":"OFF (memory only)");
+function httpsReq(method,path,bodyObj){
+return new Promise((resolve,reject)=>{
+let host,base,port;
+try{const u=new URL(SUPABASE_URL);host=u.hostname;port=u.port||443;base=u.pathname.replace(/\/$/,"")}catch(e){return reject(new Error("Bad SUPABASE_URL"))}
+const body=bodyObj?JSON.stringify(bodyObj):null;
+const headers={
+"apikey":SUPABASE_KEY,
+"Authorization":"Bearer "+SUPABASE_KEY,
+"Content-Type":"application/json"
+};
+if(method==="POST")headers["Prefer"]="return=minimal";
+if(body)headers["Content-Length"]=Buffer.byteLength(body);
+const req=https.request({hostname:host,port:port,path:base+path,method,headers},res=>{
+let data="";
+res.on("data",c=>data+=c);
+res.on("end",()=>{
+if(res.statusCode>=200&&res.statusCode<300)resolve(data);
+else reject(new Error("HTTP "+res.statusCode+": "+data.slice(0,200)));
+});
+});
+req.on("error",e=>reject(e));
+if(body)req.write(body);
+req.end();
+});
+}
 async function dbInsert(row){
 if(!DB_ON)return;
 try{
-await fetch(SUPABASE_URL+"/rest/v1/plays",{
-method:"POST",
-headers:{
-"apikey":SUPABASE_KEY,
-"Authorization":"Bearer "+SUPABASE_KEY,
-"Content-Type":"application/json",
-"Prefer":"return=minimal"
-},
-body:JSON.stringify(row)
-});
-}catch(e){console.log("DB insert error:",e.message)}
+await httpsReq("POST","/rest/v1/plays",row);
+DB_OK_ONCE=true;
+DB_LAST_ERR="";
+}catch(e){DB_LAST_ERR=e.message;console.log("DB insert error:",e.message)}
 }
 async function dbFetch(){
 if(!DB_ON)return null;
 try{
-const r=await fetch(SUPABASE_URL+"/rest/v1/plays?select=*&order=t.desc&limit=2000",{
-headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY}
-});
-if(!r.ok)return null;
-return await r.json();
-}catch(e){console.log("DB fetch error:",e.message);return null}
+const data=await httpsReq("GET","/rest/v1/plays?select=*&order=t.desc&limit=2000",null);
+DB_OK_ONCE=true;
+DB_LAST_ERR="";
+return JSON.parse(data);
+}catch(e){DB_LAST_ERR=e.message;console.log("DB fetch error:",e.message);return null}
 }
 function hist(action,name,room){
 const h={t:new Date().toISOString(),action,name,room:room||""};
@@ -67,7 +92,16 @@ res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});
 let html='<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Water Escape · Players</title>';
 html+='<style>body{background:#0a0716;color:#eafaff;font-family:monospace;padding:20px;max-width:900px;margin:0 auto}h1{color:#5fe6ff}.s{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}.c{background:#161b24;border:2px solid #2a5a86;border-radius:8px;padding:12px 18px}.c b{color:#ffd23f;font-size:22px;display:block}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{text-align:left;padding:8px;border-bottom:1px solid #223}th{color:#8fe0f5}tr:hover{background:#111a2b}.tag{color:#37e08a}.warn{color:#ff8c6a;font-size:13px}</style>';
 html+='<h1>🎮 Water Escape — Players</h1>';
-if(!persisted)html+='<p class="warn">⚠ Showing in-memory data only (resets when the server restarts). Configure Supabase for permanent history.</p>';
+html+='<div style="background:#0d1420;border:1px solid #223;border-radius:8px;padding:12px;margin:12px 0;font-size:13px">';
+html+='<b style="color:#8fe0f5">Diagnostic:</b><br>';
+html+='Node version: '+esc(process.version)+'<br>';
+html+='SUPABASE_URL configured: '+(SUPABASE_URL?'<span class=tag>yes</span>':'<span class=warn>NO — missing</span>')+'<br>';
+html+='SUPABASE_KEY configured: '+(SUPABASE_KEY?('<span class=tag>yes (length '+SUPABASE_KEY.length+')</span>'):'<span class=warn>NO — missing</span>')+'<br>';
+html+='Database mode: '+(DB_ON?'<span class=tag>ON</span>':'<span class=warn>OFF</span>')+'<br>';
+html+='Connection test: '+(DB_OK_ONCE?'<span class=tag>✓ connected successfully</span>':(DB_ON?'<span class=warn>✗ failed</span>':'not attempted (no keys)'))+'<br>';
+if(DB_LAST_ERR)html+='Last error: <span class=warn>'+esc(DB_LAST_ERR)+'</span><br>';
+html+='</div>';
+if(!persisted)html+='<p class="warn">⚠ Showing in-memory data only (resets when the server restarts). See diagnostic above.</p>';
 else html+='<p class="tag">✓ Persistent history (survives restarts)</p>';
 html+='<div class="s"><div class="c"><b>'+uniq.size+'</b>unique players</div><div class="c"><b>'+rows.length+'</b>total events</div><div class="c"><b>'+creates+'</b>rooms created</div><div class="c"><b>'+joins+'</b>joins</div></div>';
 html+='<table><tr><th>Nickname</th><th>Times played</th><th>First seen</th><th>Last seen</th></tr>';
