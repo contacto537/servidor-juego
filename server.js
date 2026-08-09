@@ -291,7 +291,10 @@ io.to(room.hostId).emit("aim",{idx:player.idx,d:dir});
 });
 sock.on("throw",d=>{
 if(!room||!player||!room.started)return;
-io.to(room.hostId).emit("throw",{idx:player.idx,d:d|0});
+let payload;
+if(Array.isArray(d)&&d.length===2)payload=[d[0]|0,d[1]|0];
+else payload=d|0;
+io.to(room.hostId).emit("throw",{idx:player.idx,d:payload});
 });
 sock.on("state",s=>{
 if(!room||room.hostId!==sock.id)return;
