@@ -144,10 +144,10 @@ for(let i=0;i<4;i++)c+=ABC[Math.floor(Math.random()*ABC.length)];
 return c;
 }
 function pmap(r){
-return r.players.map(p=>({idx:p.idx,name:p.name,cos:p.cos||null}));
+return r.players.map(p=>({idx:p.idx,name:p.name,cos:p.cos||null,char:p.char||"miner"}));
 }
 function lobby(r){
-return{code:r.code,players:pmap(r),started:r.started,mode:r.mode||"ffa"};
+return{code:r.code,players:pmap(r),started:r.started,mode:r.mode||"ffa",map:r.map||"waterescape"};
 }
 function finalize(room,pl){
 if(!rooms[room.code])return;
@@ -190,10 +190,11 @@ let player=null;
 let me=null;
 sock.on("hello",(raw,cb)=>{
 if(typeof cb!=="function")return;
-let n,sid,cos=null;
+let n,sid,cos=null,ch="";
 if(raw&&typeof raw==="object"){
 n=raw.name;
 sid=String(raw.sid||"").replace(/[^\w-]/g,"").slice(0,24);
+ch=String(raw.char||"").replace(/[^\w-]/g,"").slice(0,24);
 if(raw.cos&&typeof raw.cos==="object")cos={s:raw.cos.s?1:0,w:raw.cos.w?1:0,g:raw.cos.g?1:0};
 }else{
 n=raw;
@@ -203,7 +204,7 @@ n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice
 if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
 if(names.has(n.toLowerCase())&&!(sid&&sessions[sid]))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
-me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20)),cos};
+me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20)),cos,char:ch||"miner"};
 hist("hello",n);
 cb({ok:true,name:n});
 });
@@ -212,8 +213,8 @@ if(typeof cb!=="function")return;
 if(!me)return cb({ok:false,err:"Pick a nickname first"});
 if(room)return cb({ok:false,err:"You are already in a room"});
 const c=makeCode();
-player={id:sock.id,idx:0,name:me.name,sid:me.sid,cos:me.cos,again:false,ghost:false,tm:null};
-room=rooms[c]={code:c,hostId:sock.id,players:[player],started:false,mode:"ffa"};
+player={id:sock.id,idx:0,name:me.name,sid:me.sid,cos:me.cos,char:me.char,again:false,ghost:false,tm:null};
+room=rooms[c]={code:c,hostId:sock.id,players:[player],started:false,mode:"ffa",map:"waterescape"};
 sessions[me.sid]={code:c,idx:0};
 sock.join(c);
 hist("create",me.name,c);
@@ -232,7 +233,7 @@ if(r.players.length>=8)return cb({ok:false,err:"Room is full (max 8)"});
 const used=r.players.map(p=>p.idx);
 let idx=0;
 while(used.includes(idx))idx++;
-player={id:sock.id,idx,name:me.name,sid:me.sid,cos:me.cos,again:false,ghost:false,tm:null};
+player={id:sock.id,idx,name:me.name,sid:me.sid,cos:me.cos,char:me.char,again:false,ghost:false,tm:null};
 room=r;
 r.players.push(player);
 sessions[me.sid]={code:c,idx};
@@ -253,6 +254,7 @@ if(!pl)return cb({ok:false});
 if(pl.tm){clearTimeout(pl.tm);pl.tm=null}
 pl.ghost=false;
 pl.id=sock.id;
+if(me.char)pl.char=me.char;
 if(pl.idx===0)r.hostId=sock.id;
 room=r;
 player=pl;
@@ -265,6 +267,13 @@ sock.on("mode",m=>{
 if(!room||room.hostId!==sock.id||room.started)return;
 if(m!=="ffa"&&m!=="surv")return;
 room.mode=m;
+io.to(room.code).emit("lobby",lobby(room));
+});
+sock.on("map",m=>{
+if(!room||room.hostId!==sock.id||room.started)return;
+m=String(m||"").replace(/[^\w-]/g,"").slice(0,24);
+if(!m)return;
+room.map=m;
 io.to(room.code).emit("lobby",lobby(room));
 });
 sock.on("start",()=>{
