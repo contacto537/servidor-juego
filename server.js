@@ -335,6 +335,7 @@ sock.on("backToLobby",()=>{
 if(!room||room.hostId!==sock.id)return;
 room.started=false;
 room.players.forEach(p=>p.again=false);
+io.to(room.code).emit("hostToLobby");
 io.to(room.code).emit("lobby",lobby(room));
 });
 sock.on("input",d=>{
