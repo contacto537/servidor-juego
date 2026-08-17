@@ -331,6 +331,12 @@ room.started=true;
 room.players.forEach(p=>p.again=false);
 io.to(room.code).emit("start",startPayload(room));
 });
+sock.on("backToLobby",()=>{
+if(!room||room.hostId!==sock.id)return;
+room.started=false;
+room.players.forEach(p=>p.again=false);
+io.to(room.code).emit("lobby",lobby(room));
+});
 sock.on("input",d=>{
 if(!room||!player||!room.started)return;
 const u=unitDir(d);
