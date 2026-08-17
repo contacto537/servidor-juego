@@ -399,6 +399,10 @@ if(!room||!player)return;
 const r=room,pl=player;
 room=null;
 player=null;
+if(!r.started){
+finalize(r,pl);
+return;
+}
 pl.ghost=true;
 r.graceUntil=Date.now()+60000;
 pl.tm=setTimeout(()=>{
