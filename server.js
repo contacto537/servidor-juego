@@ -61,6 +61,126 @@ return null;
 }
 }catch(e){DB_LAST_ERR=e.message;console.log("DB fetch error:",e.message);return null}
 }
+var BAD_ROOTS=["fuck","fuk","fck","fvck","phuck","shit","sh1t","bitch","bich","cunt","dick","cock","pussy","pusy","porn","pron","p0rn","sex","nigga","nigger","niga","fag","faggot","whore","slut","rape","tits","boob","penis","vagina","nazi","hitler","kkk","cum","dildo","horny","hentai","xxx","puta","puto","mierda","verga","vrga","pendejo","pendeja","culo","culero","chinga","chingar","chingada","cabron","cabrona","joder","conyo","conyi","conya","pinche","mamada","maricon","marica","zorra","perra","pito","pija","polla","teta","tetas","pene","follar","putazo","mamon","mamona","carajo","chupa","chupame","panoch","nalga","nalgas","hijodeputa","hdp","ptm","mrd","wtf","fokin","fucking","motherfucker","asshole","bastard","retard","onlyfans","sexo","desnuda","desnudo","violar","violador","pornografia"];
+var BAD_SAFE_SUBS=["analy","analysis","canal","banal","cumbia","cumple","cumbre","documento","circum","scum","assis","assum","assoc","classic","pass","glass","grass","bass","mass","cassie","essex","sussex","peninsula","pitos","pitón","piton","pitoresc","dickens","cockatoo","cockpit","hancock","peacock","kkkk","conoc","culomb","articulo","curriculo","vinculo","circulo","calculo","mayuscula","minuscula","nalgada","sexto","sexta","sextet","capitol","cockroach"];
+function badNormalize(s){
+var t=String(s||"").toLowerCase();
+t=t.replace(/ñ/g,"ny").replace(/[áàäâã]/g,"a").replace(/[éèëê]/g,"e").replace(/[íìïî]/g,"i").replace(/[óòöôõ]/g,"o").replace(/[úùüû]/g,"u");
+t=t.replace(/0/g,"o").replace(/1/g,"i").replace(/3/g,"e").replace(/4/g,"a").replace(/5/g,"s").replace(/7/g,"t").replace(/8/g,"b").replace(/9/g,"g").replace(/@/g,"a").replace(/\$/g,"s").replace(/!/g,"i").replace(/\|/g,"l").replace(/\+/g,"t").replace(/€/g,"e").replace(/¢/g,"c").replace(/ß/g,"ss");
+t=t.replace(/[^a-z]/g,"");
+return t;
+}
+function badCollapse(t){return t.replace(/(.)\1+/g,"$1");}
+function isBadName(s){
+var forms=[badNormalize(s)];
+forms.push(badCollapse(forms[0]));
+forms.push(forms[0].replace(/v/g,"u"));
+forms.push(forms[0].replace(/ck/g,"k").replace(/q/g,"k").replace(/x/g,"ks").replace(/ph/g,"f"));
+for(var f=0;f<forms.length;f++){
+var t=forms[f];
+if(!t)continue;
+for(var i=0;i<BAD_ROOTS.length;i++){
+var w=BAD_ROOTS[i];
+var pos=t.indexOf(w);
+while(pos>=0){
+var safe=false;
+for(var k=0;k<BAD_SAFE_SUBS.length&&!safe;k++){var sws=[BAD_SAFE_SUBS[k],badCollapse(BAD_SAFE_SUBS[k])];for(var m=0;m<2;m++){var sw=sws[m];var sp=t.indexOf(sw);while(sp>=0){if(pos>=sp&&pos+w.length<=sp+sw.length){safe=true;break;}sp=t.indexOf(sw,sp+1);}if(safe)break;}}
+if(!safe)return true;
+pos=t.indexOf(w,pos+1);
+}
+}
+}
+return false;
+}
+const LB_MODES=["normal","rush","memory"];
+const LB_MAX={normal:5000,rush:5000,memory:2000};
+const LB_MEM={normal:new Map(),rush:new Map(),memory:new Map()};
+const LB_CACHE={};
+const LB_RATE=new Map();
+function httpsReqFull(method,path,bodyObj,extraHeaders){
+return new Promise((resolve,reject)=>{
+let host,base,port;
+try{const u=new URL(SUPABASE_URL);host=u.hostname;port=u.port||443;base=u.pathname.replace(/\/$/,"")}catch(e){return reject(new Error("Bad SUPABASE_URL"))}
+const body=bodyObj?JSON.stringify(bodyObj):null;
+const headers=Object.assign({"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json"},extraHeaders||{});
+if(body)headers["Content-Length"]=Buffer.byteLength(body);
+const req=https.request({hostname:host,port:port,path:base+path,method,headers},res=>{
+let data="";
+res.on("data",c=>data+=c);
+res.on("end",()=>{
+if(res.statusCode>=200&&res.statusCode<300)resolve({body:data,headers:res.headers});
+else reject(new Error("HTTP "+res.statusCode+": "+data.slice(0,200)));
+});
+});
+req.on("error",e=>reject(e));
+if(body)req.write(body);
+req.end();
+});
+}
+function lbClean(name){
+let n=String(name||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice(0,12);
+if(!n||isBadName(n))return null;
+return n;
+}
+async function lbSubmit(dev,name,mode,score){
+score=Math.max(0,Math.min(LB_MAX[mode],score|0));
+const t=new Date().toISOString();
+if(DB_ON){
+try{
+const cur=await httpsReqFull("GET","/rest/v1/scores?select=score&dev=eq."+encodeURIComponent(dev)+"&mode=eq."+mode+"&limit=1",null);
+const rows=JSON.parse(cur.body||"[]");
+const prev=rows.length?(rows[0].score|0):-1;
+if(score>prev){
+await httpsReqFull("POST","/rest/v1/scores?on_conflict=dev,mode",{dev,name,mode,score,t},{"Prefer":"resolution=merge-duplicates,return=minimal"});
+}else if(rows.length){
+await httpsReqFull("PATCH","/rest/v1/scores?dev=eq."+encodeURIComponent(dev)+"&mode=eq."+mode,{name},{"Prefer":"return=minimal"});
+}
+const best=Math.max(prev,score);
+const cnt=await httpsReqFull("GET","/rest/v1/scores?select=dev&mode=eq."+mode+"&score=gt."+best+"&limit=1",null,{"Prefer":"count=exact","Range":"0-0"});
+let above=0;
+const cr=String(cnt.headers["content-range"]||"");
+const m=cr.match(/\/(\d+)/);
+if(m)above=parseInt(m[1],10)||0;
+delete LB_CACHE[mode];
+DB_OK_ONCE=true;
+return {ok:true,rank:above+1,best};
+}catch(e){DB_LAST_ERR=e.message;console.log("LB db error:",e.message);}
+}
+const M=LB_MEM[mode];
+const prev=M.get(dev);
+if(!prev||score>prev.score)M.set(dev,{name,score,t});
+else M.set(dev,{name,score:prev.score,t:prev.t});
+const best=M.get(dev).score;
+let above=0;
+for(const v of M.values())if(v.score>best)above++;
+delete LB_CACHE[mode];
+return {ok:true,rank:above+1,best};
+}
+async function lbTop(mode){
+const c=LB_CACHE[mode];
+if(c&&Date.now()-c.at<15000)return c.list;
+let list=null;
+if(DB_ON){
+try{
+const r=await httpsReqFull("GET","/rest/v1/scores?select=name,score,dev&mode=eq."+mode+"&order=score.desc,t.asc&limit=10",null);
+list=JSON.parse(r.body||"[]").map(x=>({name:x.name,score:x.score|0,dev:x.dev}));
+DB_OK_ONCE=true;
+}catch(e){DB_LAST_ERR=e.message;console.log("LB top error:",e.message);list=null;}
+}
+if(!list){
+list=[...LB_MEM[mode].entries()].map(([dev,v])=>({name:v.name,score:v.score,dev,t:v.t})).sort((a,b)=>b.score-a.score||String(a.t).localeCompare(String(b.t))).slice(0,10);
+}
+LB_CACHE[mode]={at:Date.now(),list};
+return list;
+}
+function readBody(req){
+return new Promise((resolve)=>{
+let d="";
+req.on("data",c=>{d+=c;if(d.length>4096)req.destroy();});
+req.on("end",()=>{try{resolve(JSON.parse(d||"{}"))}catch(e){resolve(null)}});
+req.on("error",()=>resolve(null));
+});
+}
 function hist(action,name,room){
 const h={t:new Date().toISOString(),action,name,room:room||""};
 HISTORY.push(h);
@@ -70,6 +190,7 @@ dbInsert(h);
 }
 const srv=http.createServer(async(req,res)=>{
 const u=new URL(req.url,"http://x");
+try{
 if(u.pathname==="/names"||u.pathname==="/stats"){
 if(u.searchParams.get("key")!==ADMIN_KEY){
 res.writeHead(403,{"Content-Type":"text/plain; charset=utf-8"});
@@ -126,8 +247,45 @@ res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
 res.end(rows.length?rows.map(h=>h.t+"  "+String(h.action).toUpperCase().padEnd(7)+"  "+h.name+(h.room?"  ["+h.room+"]":"")).join("\n"):"(no players logged yet)");
 return;
 }
+if(u.pathname==="/top"||u.pathname==="/score"){
+const cors={"Content-Type":"application/json; charset=utf-8","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type","Cache-Control":"no-store"};
+if(req.method==="OPTIONS"){res.writeHead(204,cors);res.end();return;}
+if(u.pathname==="/top"){
+const mode=String(u.searchParams.get("mode")||"normal");
+if(!LB_MODES.includes(mode)){res.writeHead(400,cors);res.end(JSON.stringify({ok:false}));return;}
+const list=await lbTop(mode);
+res.writeHead(200,cors);
+res.end(JSON.stringify({ok:true,mode,list:list.map(x=>({name:x.name,score:x.score,dev:x.dev}))}));
+return;
+}
+if(req.method!=="POST"){res.writeHead(405,cors);res.end(JSON.stringify({ok:false}));return;}
+const ip=String(req.headers["x-forwarded-for"]||req.socket.remoteAddress||"").split(",")[0].trim();
+const now=Date.now();
+const rl=LB_RATE.get(ip)||{n:0,at:now};
+if(now-rl.at>60000){rl.n=0;rl.at=now;}
+rl.n++;LB_RATE.set(ip,rl);
+if(rl.n>30){res.writeHead(429,cors);res.end(JSON.stringify({ok:false,err:"slow down"}));return;}
+const b=await readBody(req);
+if(!b){res.writeHead(400,cors);res.end(JSON.stringify({ok:false}));return;}
+const dev=String(b.dev||"").replace(/[^\w-]/g,"").slice(0,24);
+const mode=String(b.mode||"");
+const score=Number(b.score);
+if(!dev||dev.length<6||!LB_MODES.includes(mode)||!isFinite(score)){res.writeHead(400,cors);res.end(JSON.stringify({ok:false,err:"bad request"}));return;}
+const name=lbClean(b.name);
+if(!name){res.writeHead(200,cors);res.end(JSON.stringify({ok:false,err:"name not allowed"}));return;}
+const out=await lbSubmit(dev,name,mode,Math.floor(score));
+res.writeHead(200,cors);
+res.end(JSON.stringify(out));
+return;
+}
+if(u.pathname==="/time"){
+res.writeHead(200,{"Content-Type":"application/json; charset=utf-8","Access-Control-Allow-Origin":"*","Cache-Control":"no-store"});
+res.end(JSON.stringify({t:Date.now()}));
+return;
+}
 res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
 res.end("Water Escape server OK");
+}catch(eH){try{res.writeHead(500,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:false}))}catch(e2){}}
 });
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 const io=new Server(srv,{cors:{origin:"*"}});
@@ -209,12 +367,13 @@ if(raw&&typeof raw==="object"){
 n=raw.name;
 sid=String(raw.sid||"").replace(/[^\w-]/g,"").slice(0,24);
 ch=String(raw.char||"").replace(/[^\w-]/g,"").slice(0,24);
-if(raw.cos&&typeof raw.cos==="object")cos={s:raw.cos.s?1:0,w:raw.cos.w?1:0,g:raw.cos.g?1:0};
+if(raw.cos&&typeof raw.cos==="object")cos={s:raw.cos.s?1:0,w:raw.cos.w?1:0,g:raw.cos.g?1:0,fx:String(raw.cos.fx||"").replace(/[^\w|]/g,"").slice(0,120)};
 }else{
 n=raw;
 sid="";
 }
 n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice(0,12);
+if(n&&isBadName(n))return cb({ok:false,err:"That nickname is not allowed"});
 if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
 if(names.has(n.toLowerCase())&&!(sid&&sessions[sid]))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
@@ -377,6 +536,14 @@ if(!room||!player||!room.started)return;
 const u=unitDir(d);
 if(!u)return;
 relay(room,player,"escape",{idx:player.idx,d:u});
+});
+sock.on("rush",()=>{
+if(!room||!player||!room.started)return;
+relay(room,player,"rush",{idx:player.idx});
+});
+sock.on("emote",k=>{
+if(!room||!player||!room.started)return;
+relay(room,player,"emote",{idx:player.idx,k:Math.max(0,Math.min(3,k|0))});
 });
 sock.on("state",s=>{
 if(!room||room.hostId!==sock.id)return;
