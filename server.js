@@ -136,14 +136,10 @@ await httpsReqFull("POST","/rest/v1/scores?on_conflict=dev,mode",{dev,name,mode,
 await httpsReqFull("PATCH","/rest/v1/scores?dev=eq."+encodeURIComponent(dev)+"&mode=eq."+mode,{name},{"Prefer":"return=minimal"});
 }
 const best=Math.max(prev,score);
-const cnt=await httpsReqFull("GET","/rest/v1/scores?select=dev&mode=eq."+mode+"&score=gt."+best+"&limit=1",null,{"Prefer":"count=exact","Range":"0-0"});
-let above=0;
-const cr=String(cnt.headers["content-range"]||"");
-const m=cr.match(/\/(\d+)/);
-if(m)above=parseInt(m[1],10)||0;
 delete LB_CACHE[mode];
 DB_OK_ONCE=true;
-return {ok:true,rank:above+1,best};
+const rn=await lbRankName(mode,name,best);
+return {ok:true,rank:rn.rank,best:rn.best};
 }catch(e){DB_LAST_ERR=e.message;console.log("LB db error:",e.message);}
 }
 const M=LB_MEM[mode];
@@ -151,27 +147,42 @@ const prev=M.get(dev);
 if(!prev||score>prev.score)M.set(dev,{name,score,t});
 else M.set(dev,{name,score:prev.score,t:prev.t});
 const best=M.get(dev).score;
-let above=0;
-for(const v of M.values())if(v.score>best)above++;
 delete LB_CACHE[mode];
-return {ok:true,rank:above+1,best};
+const rn=await lbRankName(mode,name,best);
+return {ok:true,rank:rn.rank,best:rn.best};
+}
+function lbDedupe(rows){
+const seen=new Set();const out=[];
+for(const r of rows){const k=String(r.name||"").toLowerCase();if(seen.has(k))continue;seen.add(k);out.push(r);}
+return out;
+}
+async function lbRows(mode){
+let list=null;
+if(DB_ON){
+try{
+const r=await httpsReqFull("GET","/rest/v1/scores?select=name,score,dev,t&mode=eq."+mode+"&order=score.desc,t.asc&limit=1000",null);
+list=JSON.parse(r.body||"[]").map(x=>({name:x.name,score:x.score|0,dev:x.dev,t:x.t}));
+DB_OK_ONCE=true;
+}catch(e){DB_LAST_ERR=e.message;console.log("LB rows error:",e.message);list=null;}
+}
+if(!list){
+list=[...LB_MEM[mode].entries()].map(([dev,v])=>({name:v.name,score:v.score,dev,t:v.t})).sort((a,b)=>b.score-a.score||String(a.t).localeCompare(String(b.t)));
+}
+return lbDedupe(list);
 }
 async function lbTop(mode){
 const c=LB_CACHE[mode];
 if(c&&Date.now()-c.at<15000)return c.list;
-let list=null;
-if(DB_ON){
-try{
-const r=await httpsReqFull("GET","/rest/v1/scores?select=name,score,dev&mode=eq."+mode+"&order=score.desc,t.asc&limit=10",null);
-list=JSON.parse(r.body||"[]").map(x=>({name:x.name,score:x.score|0,dev:x.dev}));
-DB_OK_ONCE=true;
-}catch(e){DB_LAST_ERR=e.message;console.log("LB top error:",e.message);list=null;}
-}
-if(!list){
-list=[...LB_MEM[mode].entries()].map(([dev,v])=>({name:v.name,score:v.score,dev,t:v.t})).sort((a,b)=>b.score-a.score||String(a.t).localeCompare(String(b.t))).slice(0,10);
-}
+const list=(await lbRows(mode)).slice(0,10);
 LB_CACHE[mode]={at:Date.now(),list};
 return list;
+}
+async function lbRankName(mode,name,best){
+const rows=await lbRows(mode);
+const k=String(name||"").toLowerCase();
+let rank=1;
+for(const r of rows){if(String(r.name||"").toLowerCase()===k)return {rank,best:Math.max(best,r.score)};if(r.score>best)rank++;}
+return {rank,best};
 }
 function readBody(req){
 return new Promise((resolve)=>{
@@ -245,6 +256,25 @@ return;
 }
 res.writeHead(200,{"Content-Type":"text/plain; charset=utf-8"});
 res.end(rows.length?rows.map(h=>h.t+"  "+String(h.action).toUpperCase().padEnd(7)+"  "+h.name+(h.room?"  ["+h.room+"]":"")).join("\n"):"(no players logged yet)");
+return;
+}
+if(u.pathname==="/me"){
+const cors0={"Content-Type":"application/json; charset=utf-8","Access-Control-Allow-Origin":"*","Cache-Control":"no-store"};
+const mode0=String(u.searchParams.get("mode")||"normal");
+const dev0=String(u.searchParams.get("dev")||"").replace(/[^\w-]/g,"").slice(0,24);
+if(!LB_MODES.includes(mode0)||dev0.length<6){res.writeHead(400,cors0);res.end(JSON.stringify({ok:false}));return;}
+try{
+let best=null;
+if(DB_ON){
+try{const cur=await httpsReqFull("GET","/rest/v1/scores?select=score&dev=eq."+encodeURIComponent(dev0)+"&mode=eq."+mode0+"&limit=1",null);const rows=JSON.parse(cur.body||"[]");if(rows.length)best=rows[0].score|0;}catch(e){DB_LAST_ERR=e.message;}
+}else{const m0=LB_MEM[mode0].get(dev0);if(m0)best=m0.score;}
+if(best===null){res.writeHead(200,cors0);res.end(JSON.stringify({ok:true,best:null,rank:null}));return;}
+let nm=null;
+if(DB_ON){try{const cur2=await httpsReqFull("GET","/rest/v1/scores?select=name&dev=eq."+encodeURIComponent(dev0)+"&mode=eq."+mode0+"&limit=1",null);const r2=JSON.parse(cur2.body||"[]");if(r2.length)nm=r2[0].name;}catch(e){}}
+else{const m2=LB_MEM[mode0].get(dev0);if(m2)nm=m2.name;}
+const rn=await lbRankName(mode0,nm||"",best);
+res.writeHead(200,cors0);res.end(JSON.stringify({ok:true,best:rn.best,rank:rn.rank}));
+}catch(e){res.writeHead(200,cors0);res.end(JSON.stringify({ok:false}));}
 return;
 }
 if(u.pathname==="/top"||u.pathname==="/score"){
