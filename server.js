@@ -192,6 +192,71 @@ req.on("end",()=>{try{resolve(JSON.parse(d||"{}"))}catch(e){resolve(null)}});
 req.on("error",()=>resolve(null));
 });
 }
+const JWT_SECRET=(process.env.JWT_SECRET||"").trim();
+const APPLE_BUNDLE_ID=(process.env.APPLE_BUNDLE_ID||"studio.wtdigital.waterescape").trim();
+const GOOGLE_CLIENT_ID=(process.env.GOOGLE_CLIENT_ID||"").trim();
+const PROG_MEM=new Map();
+const PROG_MAX_STARS=10000000;
+let JOSE=null;
+try{JOSE=require("jose");}catch(e){console.log("jose module missing: run npm install jose");}
+const APPLE_JWKS=JOSE?JOSE.createRemoteJWKSet(new URL("https://appleid.apple.com/auth/keys")):null;
+const GOOGLE_JWKS=JOSE?JOSE.createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs")):null;
+console.log("Cloud save:",(JWT_SECRET&&JOSE)?"ON":"OFF (set JWT_SECRET and npm install jose)");
+function progSecret(){return new TextEncoder().encode(JWT_SECRET);}
+async function progVerifyApple(idToken){
+const {payload}=await JOSE.jwtVerify(idToken,APPLE_JWKS,{issuer:"https://appleid.apple.com",audience:APPLE_BUNDLE_ID});
+if(!payload.sub)throw new Error("no sub");
+return "apple:"+payload.sub;
+}
+async function progVerifyGoogle(idToken){
+if(!GOOGLE_CLIENT_ID)throw new Error("google not configured");
+const {payload}=await JOSE.jwtVerify(idToken,GOOGLE_JWKS,{issuer:["https://accounts.google.com","accounts.google.com"],audience:GOOGLE_CLIENT_ID});
+if(!payload.sub)throw new Error("no sub");
+return "google:"+payload.sub;
+}
+async function progSession(uid,provider){
+return await new JOSE.SignJWT({uid,provider}).setProtectedHeader({alg:"HS256"}).setIssuedAt().setExpirationTime("365d").sign(progSecret());
+}
+async function progAuth(req){
+const h=String(req.headers.authorization||"");
+const tok=h.startsWith("Bearer ")?h.slice(7):"";
+if(!tok||!JOSE||!JWT_SECRET)return null;
+try{const {payload}=await JOSE.jwtVerify(tok,progSecret());return payload&&payload.uid?payload:null;}catch(e){return null;}
+}
+function progClean(d){
+if(!d||typeof d!=="object")return null;
+const o={v:1,ts:Date.now()};
+o.stars=Math.max(0,Math.min(PROG_MAX_STARS,Number(d.stars)||0));
+o.best=Math.max(0,Number(d.best)|0);o.bestSoloN=Math.max(0,Number(d.bestSoloN)|0);o.bestSoloR=Math.max(0,Number(d.bestSoloR)|0);
+o.name=String(d.name||"").slice(0,12);o.nameTyped=!!d.nameTyped;o.soloSeen=!!d.soloSeen;
+o.inv=(d.inv&&typeof d.inv==="object")?d.inv:{};
+o.char=(d.char&&typeof d.char==="object")?{own:d.char.own||{},sel:String(d.char.sel||"miner")}:{own:{},sel:"miner"};
+o.fx=(d.fx&&typeof d.fx==="object")?{own:d.fx.own||{},sel:d.fx.sel||{}}:{own:{},sel:{}};
+o.cos=(d.cos&&typeof d.cos==="object")?{own:d.cos.own||{},eq:d.cos.eq||{}}:{own:{},eq:{}};
+return o;
+}
+async function progGet(uid){
+if(DB_ON){
+try{const r=await httpsReqFull("GET","/rest/v1/progress?select=data&uid=eq."+encodeURIComponent(uid)+"&limit=1",null);const rows=JSON.parse(r.body||"[]");DB_OK_ONCE=true;if(rows.length)return rows[0].data||null;return null;}
+catch(e){DB_LAST_ERR=e.message;console.log("progress get error:",e.message);}
+}
+const m=PROG_MEM.get(uid);return m?m.data:null;
+}
+async function progPut(uid,provider,data){
+if(DB_ON){
+try{await httpsReqFull("POST","/rest/v1/progress?on_conflict=uid",{uid,provider,data,updated_at:new Date().toISOString()},{"Prefer":"resolution=merge-duplicates,return=minimal"});DB_OK_ONCE=true;return true;}
+catch(e){DB_LAST_ERR=e.message;console.log("progress put error:",e.message);}
+}
+PROG_MEM.set(uid,{provider,data});return true;
+}
+function readBodyBig(req){
+return new Promise((resolve)=>{
+let d="";
+req.on("data",c=>{d+=c;if(d.length>200000)req.destroy();});
+req.on("end",()=>{try{resolve(JSON.parse(d||"{}"))}catch(e){resolve(null)}});
+req.on("error",()=>resolve(null));
+});
+}
 function hist(action,name,room){
 const h={t:new Date().toISOString(),action,name,room:room||""};
 HISTORY.push(h);
@@ -308,6 +373,44 @@ res.writeHead(200,cors);
 res.end(JSON.stringify(out));
 return;
 }
+if(u.pathname==="/api/auth"||u.pathname==="/api/progress"){
+const corsP={"Content-Type":"application/json; charset=utf-8","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,PUT,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization","Cache-Control":"no-store"};
+if(req.method==="OPTIONS"){res.writeHead(204,corsP);res.end();return;}
+if(!JOSE||!JWT_SECRET){res.writeHead(500,corsP);res.end(JSON.stringify({ok:false,err:"cloud save not configured"}));return;}
+if(u.pathname==="/api/auth"){
+if(req.method!=="POST"){res.writeHead(405,corsP);res.end(JSON.stringify({ok:false}));return;}
+const b=await readBodyBig(req);
+if(!b){res.writeHead(400,corsP);res.end(JSON.stringify({ok:false}));return;}
+const provider=String(b.provider||"");
+try{
+let uid;
+if(provider==="apple")uid=await progVerifyApple(String(b.idToken||""));
+else if(provider==="google")uid=await progVerifyGoogle(String(b.idToken||""));
+else{res.writeHead(400,corsP);res.end(JSON.stringify({ok:false,err:"provider"}));return;}
+const tok=await progSession(uid,provider);
+hist("cloud",uid.slice(0,20));
+res.writeHead(200,corsP);res.end(JSON.stringify({ok:true,uid,tok}));
+}catch(e){console.log("auth error:",e.message);res.writeHead(401,corsP);res.end(JSON.stringify({ok:false,err:"invalid token"}));}
+return;
+}
+const ses=await progAuth(req);
+if(!ses){res.writeHead(401,corsP);res.end(JSON.stringify({ok:false}));return;}
+if(req.method==="GET"){
+const data=await progGet(ses.uid);
+res.writeHead(200,corsP);res.end(JSON.stringify({ok:true,data:data||null}));
+return;
+}
+if(req.method==="PUT"||req.method==="POST"){
+const b=await readBodyBig(req);
+const d=progClean(b);
+if(!d){res.writeHead(400,corsP);res.end(JSON.stringify({ok:false}));return;}
+const ok=await progPut(ses.uid,String(ses.provider||""),d);
+res.writeHead(ok?200:500,corsP);res.end(JSON.stringify({ok:!!ok}));
+return;
+}
+res.writeHead(405,corsP);res.end(JSON.stringify({ok:false}));
+return;
+}
 if(u.pathname==="/time"){
 res.writeHead(200,{"Content-Type":"application/json; charset=utf-8","Access-Control-Allow-Origin":"*","Cache-Control":"no-store"});
 res.end(JSON.stringify({t:Date.now()}));
@@ -404,7 +507,7 @@ sid="";
 }
 n=String(n||"").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g,"").trim().slice(0,12);
 if(n&&isBadName(n))return cb({ok:false,err:"That nickname is not allowed"});
-if(!n)n="Frog_"+Math.floor(Math.random()*90+10);
+if(!n){const NA=["Salty","Sneaky","Rusty","Zippy","Mossy","Frosty","Turbo","Jolly","Grumpy","Bouncy","Pixel","Rogue","Crispy","Swift"],NN=["Otter","Newt","Squid","Gecko","Yeti","Comet","Pickle","Noodle","Waffle","Walrus","Puffin","Sloth","Kraken","Goblin"];n=(NA[Math.floor(Math.random()*NA.length)]+NN[Math.floor(Math.random()*NN.length)]).slice(0,12);}
 if(names.has(n.toLowerCase())&&!(sid&&sessions[sid]))return cb({ok:false,err:"That nickname is already taken"});
 names.add(n.toLowerCase());
 me={name:n,sid:sid||("a"+sock.id.replace(/[^\w-]/g,"").slice(0,20)),cos,char:ch||"miner"};
