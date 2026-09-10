@@ -1,10 +1,11 @@
 "use strict";
 
-// Based on the complete server supplied in the conversation. No database
-// migration or change of game rules is required. The matching www is included.
+// Existing rooms, authentication and Supabase endpoints are preserved.
+// Memory Run shares this HTTP listener; no extra Render service is needed.
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const RosterMigration = require("./roster-migration.js");
 
 function createWaterEscapeServer(options = {}) {
   const env = options.env || process.env;
@@ -291,6 +292,12 @@ function createWaterEscapeServer(options = {}) {
   async function handleHttp(req, res) {
     try {
       const u = new URL(req.url, "http://localhost");
+      // Delegate before generic CORS/body handling: Memory owns its native-app
+      // origin checks and private, per-player snapshots.
+      if (u.pathname === "/api/memory" || u.pathname.startsWith("/api/memory/")) {
+        if (memory) return await memory.handler(req, res);
+        send(res, 503, {error:"Memory Run is temporarily unavailable. Please try again."}); return;
+      }
       if (u.pathname === "/names" || u.pathname === "/stats") {
         if (!ADMIN_KEY || u.searchParams.get("key") !== ADMIN_KEY) { send(res, 403, "Forbidden", { "Content-Type":"text/plain; charset=utf-8" }); return; }
         let rows = await dbFetch(); const persisted = rows !== null; if (!persisted) rows = HISTORY.slice();
@@ -376,7 +383,17 @@ function createWaterEscapeServer(options = {}) {
     } catch (e) { dbError(e); send(res,503,{ok:false,err:"temporarily unavailable"}); }
   }
 
+  let memory = null;
+  try {
+    const createMemory = options.createMemoryService || require("./memory-service.cjs").createService;
+    memory = createMemory(Object.assign({}, options.memory || {}, {env, log}));
+  } catch (e) {
+    // A damaged or unavailable Memory data file must not take existing
+    // multiplayer, purchases/cloud credentials or rankings offline.
+    log("Memory Run initialization failed:", e.message);
+  }
   const srv = http.createServer(handleHttp);
+  srv.on("close", () => { if (memory) memory.close(); });
   const Server = options.Server || require("socket.io").Server;
   const io = new Server(srv, { cors: { origin: "*" }, maxHttpBufferSize: 1000000 });
   const rooms = new Map(), sessions = new Map(), names = new Map();
@@ -386,7 +403,7 @@ function createWaterEscapeServer(options = {}) {
   const live = p => !p.ghost && !!io.sockets.sockets.get(p.id)?.connected;
   function makeCode() { let code; do { code = Array.from({length:4}, () => ABC[crypto.randomInt(ABC.length)]).join(""); } while (rooms.has(code)); return code; }
   function pmap(r, participants = false) {
-    return r.players.filter(p => !participants || p.inMatch).map(p => ({ idx:p.idx,pid:p.pid,name:p.name,cos:p.cos || null,char:p.char || "miner",
+    return r.players.filter(p => !participants || p.inMatch).map(p => ({ idx:p.idx,pid:p.pid,name:p.name,cos:p.cos || null,char:RosterMigration.resolve(p.char),
       team:p.team == null ? null : p.team,connected:live(p),inMatch:!!p.inMatch }));
   }
   function lobby(r) { return {code:r.code,players:pmap(r),started:r.started,mode:r.mode,map:r.map,teams:r.mode === "teams",match:r.match,hostConnected:r.players.some(p => p.idx === 0 && live(p))}; }
@@ -491,7 +508,7 @@ function createWaterEscapeServer(options = {}) {
         names.get(me.name.toLowerCase())?.ids.delete(sock.id); releaseName(me.sid);
       }
       const entry = reservation || {sid,ids:new Set()}; entry.ids.add(sock.id); names.set(key,entry);
-      me={name,sid,char:cleanId(data.char)||"miner",protocol:data.protocol|0,resumeToken:supplied,
+      me={name,sid,char:RosterMigration.resolve(cleanId(data.char)),protocol:data.protocol|0,resumeToken:supplied,
         cos:data.cos&&typeof data.cos==="object"?{s:data.cos.s?1:0,w:data.cos.w?1:0,g:data.cos.g?1:0,fx:String(data.cos.fx||"").replace(/[^\w|]/g,"").slice(0,120)}:null};
       hist("hello",name); cb({ok:true,name,protocol:2,rejoin:!!prior});
     });
@@ -536,7 +553,7 @@ function createWaterEscapeServer(options = {}) {
     sock.on("map",map => {if(!host()||room.started||!MAPS.includes(map))return;room.map=map;emitLobby(room);});
     sock.on("team",team => {if(!owns()||room.started||room.mode!=="teams"||!Number.isInteger(team)||team<0||team>3)return;player.team=team;emitLobby(room);io.to(room.hostId).emit("peerTeam",{idx:player.idx,team});});
     sock.on("setTeam",d => {if(!host()||room.started||!d||!Number.isInteger(d.team)||d.team<0||d.team>3)return;const p=room.players.find(x=>x.idx===d.idx);if(p){p.team=d.team;emitLobby(room);}});
-    sock.on("char",ch => {if(!owns()||room.started)return;ch=cleanId(ch);if(ch){player.char=ch;me.char=ch;emitLobby(room);}});
+    sock.on("char",ch => {if(!owns()||room.started)return;ch=cleanId(ch);if(ch){player.char=RosterMigration.resolve(ch);me.char=player.char;emitLobby(room);}});
     sock.on("start",() => {
       if(!host()||room.started)return;
       const active=room.players.filter(live);if(active.length<2)return;
@@ -589,16 +606,17 @@ function createWaterEscapeServer(options = {}) {
   });
   function close() {
     closing = true;
+    if (memory) memory.close();
     for(const r of rooms.values())for(const p of r.players)if(p.tm)cancel(p.tm);
     return new Promise(resolve=>io.close(resolve));
   }
-  return {srv,io,close,joseReady,handleHttp,rooms,sessions,
+  return {srv,io,close,joseReady,handleHttp,rooms,sessions,memory,
     diagnostics:{httpsReqFull,lbSubmit,lbRows,progPut,progGet,progClean,isBadName,finalize}};
 }
 
 if(require.main===module){
   const app=createWaterEscapeServer();
   const port=Number(process.env.PORT)||3000;
-  app.srv.listen(port,()=>console.log("Water Escape server listening on "+port));
+  app.srv.listen(port,"0.0.0.0",()=>console.log("Water Escape server listening on "+port));
 }
 module.exports={createWaterEscapeServer};
