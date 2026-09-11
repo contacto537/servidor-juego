@@ -5,7 +5,7 @@
   else root.MemoryRules = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const COLS = 5, ROWS = 9, ONLINE_ROWS = 10, INTRO_MS = 5000, RULES_VERSION = 6;
+  const COLS = 5, ROWS = 9, ONLINE_ROWS = 10, INTRO_MS = 5000, RULES_VERSION = 7;
   const bounded = (v, a, b) => Math.max(a, Math.min(b, v));
   function splashDuration(count) {
     const n = Number(count);
@@ -29,7 +29,7 @@
   // run may continue in the same direction on the next row, but can reverse only
   // after a straight connector row. This leaves an empty row between switchbacks
   // instead of drawing confusing parallel tracks or filled 2-by-2 corners.
-  const routeModels = new Map();
+  const routeModels = new Map(), routeHistory = new WeakMap();
   function routeModel(extra) {
     if (routeModels.has(extra)) return routeModels.get(extra);
     const memo = new Map();
@@ -47,7 +47,13 @@
       memo.set(key, total); return total;
     }
     const starts = Array.from({ length: COLS }, (_, col) => count(ROWS - 1, col, extra, 0));
-    const model = { count, starts, total: starts.reduce((a, b) => a + b, 0), extra };
+    const total = starts.reduce((a, b) => a + b, 0);
+    // A coprime stride visits unrelated ranks first and cannot repeat a rank.
+    // This also keeps fallback selection useful with an injected constant RNG.
+    const gcd = (a, b) => { while (b) { const next = a % b; a = b; b = next; } return a; };
+    let stride = Math.max(1, Math.floor(total * .61803398875));
+    while (gcd(stride, total) !== 1) stride++;
+    const model = { count, starts, total, extra, stride };
     routeModels.set(extra, model); return model;
   }
   function routeIndex(model, random) {
@@ -70,8 +76,39 @@
     }
     return path;
   }
+  function variedModel(config, random) {
+    // The old exact-length target eventually filled every available turn,
+    // forcing nearly identical edge-to-edge sweeps. Choose the length first,
+    // rather than favouring lengths merely because they have more routes.
+    // Keep short, medium and longer shapes available even on late waves; the
+    // original clock/reveal settings remain independent of this choice.
+    const maximum = Math.min(12, config.extra), minimum = Math.max(1, Math.floor(maximum / 3));
+    const extra = minimum + routeIndex({ total: maximum - minimum + 1 }, random);
+    return routeModel(extra);
+  }
+  function routeShape(path) {
+    const runs = Array(ROWS - 1).fill(0);
+    for (let i = 1; i < path.length; i++) if (path[i][1] === path[i - 1][1])
+      runs[ROWS - 1 - path[i][1]] += path[i][0] - path[i - 1][0];
+    const forward = runs.join(','), mirrored = runs.map(n => -n).join(',');
+    return forward < mirrored ? forward : mirrored;
+  }
+  function chooseRoute(model, random, used, history) {
+    const initial = routeIndex(model, random);
+    let fallback = null;
+    // Eight seats and three recent shapes per seat need only a small bounded
+    // candidate pool. Prefer a new silhouette, including mirror/column shifts.
+    for (let i = 0; i < Math.min(model.total, 64); i++) {
+      const rank = (initial + i * model.stride) % model.total;
+      if (used.has(rank)) continue;
+      const path = routeAt(model, rank), shape = routeShape(path), candidate = { rank, path, shape };
+      if (!fallback) fallback = candidate;
+      if (!history.includes(shape)) return candidate;
+    }
+    return fallback;
+  }
   function pattern(round, difficulty, random = Math.random) {
-    const model = routeModel(settings(round, difficulty).extra);
+    const model = variedModel(settings(round, difficulty), random);
     return routeAt(model, routeIndex(model, random));
   }
   function player(info) {
@@ -94,14 +131,15 @@
     m.showAt = now + (first ? m.splashMs + INTRO_MS : 700);
     m.runAt = m.showAt + m.config.show * 1000;
     m.phase = 'playing'; m.nextAt = 0; m.settleAt = 0;
-    const used = new Set(), model = routeModel(m.config.extra);
+    // Every participant receives the same step budget on this wave, with a
+    // separate private path. Length varies between waves, never between seats.
+    const used = new Set(), model = variedModel(m.config, random);
+    m.config.pathLength = ROWS + model.extra;
     for (const p of m.players) {
       if (p.lives <= 0) continue;
-      let rank = routeIndex(model, random);
-      // At most seven occupied ranks: uniqueness remains bounded even when an
-      // injected RNG returns one constant. Every supported length has >=8 routes.
-      for (let attempts = 0; attempts < m.players.length && used.has(rank); attempts++) rank = (rank + 1) % model.total;
-      used.add(rank); p.path = routeAt(model, rank);
+      const history = routeHistory.get(p) || [], route = chooseRoute(model, random, used, history);
+      used.add(route.rank); p.path = route.path;
+      routeHistory.set(p, [route.shape, ...history].slice(0, 3));
       if (!m.solo) p.path = p.path.map(([c,r]) => [c,r+1]);
       p.pos = p.path[0].slice();
       p.progress = 0; p.maxProgress = 0; p.status = 'solving'; p.readyAt = m.runAt;
@@ -216,7 +254,7 @@
   }
   function spectate(m,id,target) {
     const p=m.players.find(p=>p.id===id),q=m.players.find(p=>p.id===target&&p.lives>0&&(p.status==='solving'||p.status==='cleared'));
-    if(m.solo||!p||(p.status!=='eliminated'&&p.status!=='out')||!q)return false;
+    if(m.solo||!p||(p.status!=='eliminated'&&p.status!=='out'&&p.status!=='cleared')||!q)return false;
     p.spectating=q.id;return true;
   }
   function snapshot(m, id, now) {
@@ -231,7 +269,7 @@
       round:p.eliminatedRound||m.round,progress:p.progress,maxProgress:p.maxProgress,
       showAt:p.showAt,readyAt:p.readyAt,deadline:p.deadline,failedAt:p.failedAt||0,
       failedPos:p.failedPos||null,fallElapsed:p.fallElapsed||0,cleared:p.cleared});
-    // Winners of this wave may observe the last runner's board, including its
+    // Winners of this wave may observe another player's board, including its
     // collapse, but never receive their answer or route progress.
     const publicBoard = p => ({...publicPlayer(p),round:p.eliminatedRound||m.round,
       showAt:p.showAt,readyAt:p.readyAt,deadline:p.deadline,failedAt:p.failedAt||0,
@@ -239,10 +277,10 @@
     // A player whose attempt ended can only watch participants still on this
     // wave. No failed player's old answer can become a spectator target.
     let watching=null;
-    if(!m.solo&&(me.status==='eliminated'||me.status==='out')&&watchable.length){
+    if(!m.solo&&(me.status==='eliminated'||me.status==='out'||me.status==='cleared')&&watchable.length){
       let target=watchable.find(p=>p.id===me.spectating);
       if(!target){const candidates=below.length?below:watchable;target=candidates[Math.floor(Math.random()*candidates.length)];me.spectating=target.id;}
-      watching=board(target);
+      watching=me.status==='cleared'?publicBoard(target):board(target);
     }
     return {rulesVersion:RULES_VERSION,version:m.version,startedAt:m.startedAt,splashMs:m.splashMs,serverNow:now,phase:m.phase,difficulty:m.difficulty,solo:m.solo,
       introRoster:m.players.map(p=>({id:p.id,name:p.name,char:p.char})),
