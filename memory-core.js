@@ -144,7 +144,7 @@
       p.pos = p.path[0].slice();
       p.progress = 0; p.maxProgress = 0; p.status = 'solving'; p.readyAt = m.runAt;
       p.showAt = m.showAt; p.deadline = m.runAt + m.config.limit * 1000;
-      p.emote = null; p.spectating = null; p.lastMoveAt = -Infinity; p.failedAt = 0; p.failedPos = null; p.fallElapsed = 0;
+      p.emote = null; p.spectating = null; p.lastMoveAt = -Infinity; p.finishedAt = 0; p.failedAt = 0; p.failedPos = null; p.fallElapsed = 0;
     }
     m.version++;
   }
@@ -267,7 +267,7 @@
       emote:p.emote&&p.emote.until>now?{...p.emote}:null });
     const board = p => ({...publicPlayer(p),path:now<p.readyAt||m.phase==='finished'?p.path.map(c=>c.slice()):null,
       round:p.eliminatedRound||m.round,progress:p.progress,maxProgress:p.maxProgress,
-      showAt:p.showAt,readyAt:p.readyAt,deadline:p.deadline,failedAt:p.failedAt||0,
+      showAt:p.showAt,readyAt:p.readyAt,deadline:p.deadline,finishedAt:p.finishedAt||0,failedAt:p.failedAt||0,
       failedPos:p.failedPos||null,fallElapsed:p.fallElapsed||0,cleared:p.cleared});
     // Winners of this wave may observe another player's board, including its
     // collapse, but never receive their answer or route progress.

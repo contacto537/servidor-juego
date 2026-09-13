@@ -1,0 +1,65 @@
+REVISION DE COMPATIBILIDAD — WATER ESCAPE
+
+Compatible con el cliente www-torretas-inmunidad.zip.
+
+CAMBIOS DE CODIGO (3 archivos)
+
+server.js
+El filtro de progreso descartaba tileThemes antes de guardar en Supabase.
+Ahora conserva las compras de los siete themes disponibles y su asignacion
+a Original, Volcano o Jungle. Tambien conserva null, que significa REMOVE.
+Una version antigua de la app que omita tileThemes conserva la seleccion y
+las compras ya almacenadas. Si esa lectura de conservacion falla, devuelve
+un error y evita sobrescribir el progreso. Los clientes actuales mantienen
+la misma operacion de escritura que ya utilizaba el servidor.
+
+memory-core.js
+Se reinicia finishedAt al comenzar cada ronda y se incluye en el snapshot
+personal. Son las mismas dos lineas que ya usa el cliente para conocer el
+momento de llegada a la meta. Las reglas y tiempos de Memory Run se conservan.
+
+roster-migration.js
+Utiliza exactamente la misma lista y conversion de personajes retirados que
+el cliente actual. La conversion conserva identidades y estadisticas.
+
+COMPATIBILIDAD ONLINE COMPROBADA
+
+El evento state existente ya retransmite todos los campos del host; esa
+logica no necesitaba modificarse. Las pruebas verifican tt9 (theme), bk9
+(torretas), tr9 (herramientas), los ocho jugadores y su inmunidad. Tambien
+verifican REMOVE, reconexion, reinicio y cambio de host. Los invitados no
+pueden publicar el estado del host.
+
+ACTUALIZACION
+
+Los nombres de ejecucion son server.js, memory-core.js, memory-service.cjs,
+roster-migration.js, package.json y package-lock.json. Los sufijos (1)/(2)
+de los archivos adjuntos solo se eliminaron para respetar sus require y npm.
+
+Reemplaza los tres archivos de codigo indicados en el servidor existente.
+El ZIP incluye tambien los otros tres archivos originales, sin modificaciones.
+Conserva las variables de entorno y el archivo de datos de Memory ya existente.
+La correccion utiliza el JSON de progreso actual; no requiere cambios de
+tablas ni dependencias nuevas.
+
+Tras actualizar y reiniciar el servidor, abre la app actualizada e inicia
+sesion/guarda el progreso desde el dispositivo donde conservas tus compras.
+Esto permite enviar los themes locales que el servidor anterior descartaba.
+Los datos que ya se hubieran perdido tanto del dispositivo como de la cuenta
+no pueden recuperarse a partir de estos archivos de codigo.
+
+PRUEBAS
+
+Se ejecutaron 10 pruebas locales con HTTP, Socket.IO y las versiones exactas
+del package-lock suministrado. Pasaron todas. Las pruebas incluyen guardado,
+REMOVE, compatibilidad con clientes antiguos, errores de almacenamiento,
+autenticacion, reconexion, aislamiento de partidas, Memory Run y rankings.
+
+Para repetirlas en una copia de desarrollo:
+  npm ci
+  npm test
+
+test/ contiene las pruebas y snapshots generados por el cliente actual.
+La base de datos y las claves de identidad de las pruebas son simuladas;
+no se conectan con cuentas o datos de produccion. La comprobacion del
+despliegue real queda pendiente de subir esta revision al servidor existente.

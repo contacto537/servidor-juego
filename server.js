@@ -247,14 +247,30 @@ function createWaterEscapeServer(options = {}) {
     } catch (_) { return null; }
   }
   const record = v => v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  const TILE_THEME_IDS = ["neon_district", "nebula", "autumn_grove", "frostpeak", "golden_dunes", "amethyst", "mushroom_grove"];
+  function progThemes(raw) {
+    const input = record(raw), owned = record(input.own), equipped = record(input.eq), out = {own:{},eq:{}};
+    const has = (object,key) => Object.prototype.hasOwnProperty.call(object,key);
+    for (const id of TILE_THEME_IDS) if (has(owned,id) && (owned[id] === true || owned[id] === 1)) out.own[id] = true;
+    for (const map of ["original","volcano","jungle"]) {
+      if (!has(equipped,map)) continue;
+      const id = equipped[map];
+      // null is an explicit REMOVE, not a missing selection to restore later.
+      if (id === null || (typeof id === "string" && has(out.own,id))) out.eq[map] = id;
+    }
+    return out;
+  }
   function progClean(d) {
     if (!d || typeof d !== "object" || Array.isArray(d)) return null;
+    const hasThemes = Object.prototype.hasOwnProperty.call(d,"tileThemes");
+    if (hasThemes && (!d.tileThemes || typeof d.tileThemes !== "object" || Array.isArray(d.tileThemes))) return null;
     const ch = record(d.char), fx = record(d.fx), cos = record(d.cos);
     return { v: 1, ts: now(), stars: Math.max(0, Math.min(10000000, Number(d.stars) || 0)),
       best: Math.max(0, Number(d.best) | 0), bestSoloN: Math.max(0, Number(d.bestSoloN) | 0), bestSoloR: Math.max(0, Number(d.bestSoloR) | 0),
       name: String(d.name || "").slice(0,12), nameTyped: !!d.nameTyped, soloSeen: !!d.soloSeen,
       inv: record(d.inv), char: { own: record(ch.own), sel: String(ch.sel || "miner") },
-      fx: { own: record(fx.own), sel: record(fx.sel) }, cos: { own: record(cos.own), eq: record(cos.eq) } };
+      fx: { own: record(fx.own), sel: record(fx.sel) }, cos: { own: record(cos.own), eq: record(cos.eq) },
+      ...(hasThemes ? {tileThemes:progThemes(d.tileThemes)} : {}) };
   }
   async function progGet(uid) {
     if (!DB_ON) throw new Error("Persistent cloud storage is not configured");
@@ -264,6 +280,13 @@ function createWaterEscapeServer(options = {}) {
   }
   async function progPut(uid, provider, data) {
     if (!DB_ON) throw new Error("Persistent cloud storage is not configured");
+    // Older app builds omit this field. Preserve its stored value instead of
+    // erasing purchased themes when the rest of that build's progress is saved.
+    // Current builds keep the existing single-write path; no database migration.
+    if (!Object.prototype.hasOwnProperty.call(data,"tileThemes")) {
+      const previous = await progGet(uid);
+      data = {...data,tileThemes:progThemes(previous && previous.tileThemes)};
+    }
     await httpsReqFull("POST", "/rest/v1/progress?on_conflict=uid", { uid, provider, data, updated_at: new Date(now()).toISOString() },
       { Prefer: "resolution=merge-duplicates,return=minimal" });
     dbGood(); return true;
