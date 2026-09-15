@@ -270,7 +270,14 @@ function createWaterEscapeServer(options = {}) {
       name: String(d.name || "").slice(0,12), nameTyped: !!d.nameTyped, soloSeen: !!d.soloSeen,
       inv: record(d.inv), char: { own: record(ch.own), sel: String(ch.sel || "miner") },
       fx: { own: record(fx.own), sel: record(fx.sel) }, cos: { own: record(cos.own), eq: record(cos.eq) },
-      ...(hasThemes ? {tileThemes:progThemes(d.tileThemes)} : {}) };
+      ...(hasThemes ? {tileThemes:progThemes(d.tileThemes)} : {}),
+      ...(Object.prototype.hasOwnProperty.call(d,"fireworkLauncher") ? progFireworks(d) : {}) };
+  }
+  function progFireworks(d) {
+    d = record(d);
+    const stamp = Number(d.fireworkEquipTs);
+    return {fireworkLauncher:d.fireworkLauncher === true, fireworkEquipped:d.fireworkEquipped !== false,
+      fireworkEquipTs:Number.isFinite(stamp) ? Math.max(0,Math.min(8640000000000000,stamp)) : 0};
   }
   async function progGet(uid) {
     if (!DB_ON) throw new Error("Persistent cloud storage is not configured");
@@ -280,11 +287,14 @@ function createWaterEscapeServer(options = {}) {
   }
   async function progPut(uid, provider, data) {
     if (!DB_ON) throw new Error("Persistent cloud storage is not configured");
-    // Older app builds omit this field. Preserve its stored value instead of
-    // erasing purchased themes when the rest of that build's progress is saved.
-    // Current builds keep the existing single-write path; no database migration.
+    // A permanent launcher purchase survives older clients and stale saves.
+    // Equipment follows its own timestamp, including an explicit UNEQUIP.
+    const previous = await progGet(uid), oldFireworks = progFireworks(previous);
+    const incomingFireworks = Object.prototype.hasOwnProperty.call(data,"fireworkLauncher") ? progFireworks(data) : oldFireworks;
+    const equipment = incomingFireworks.fireworkEquipTs >= oldFireworks.fireworkEquipTs ? incomingFireworks : oldFireworks;
+    data = {...data,...equipment,fireworkLauncher:oldFireworks.fireworkLauncher || incomingFireworks.fireworkLauncher};
+    // Older builds also retain their existing tile-theme compatibility.
     if (!Object.prototype.hasOwnProperty.call(data,"tileThemes")) {
-      const previous = await progGet(uid);
       data = {...data,tileThemes:progThemes(previous && previous.tileThemes)};
     }
     await httpsReqFull("POST", "/rest/v1/progress?on_conflict=uid", { uid, provider, data, updated_at: new Date(now()).toISOString() },
@@ -596,6 +606,32 @@ function createWaterEscapeServer(options = {}) {
     sock.on("chainArm",d=>{if(playing())relay("chainArm",{idx:player.idx,d:d?1:0});});
     sock.on("rush",()=>{if(playing())relay("rush",{idx:player.idx});});
     sock.on("emote",k=>{if(!playing()||!Number.isInteger(k)||k<0||k>6)return;relay("emote",{idx:player.idx,k});});
+    sock.on("firework",packet=>{
+      if(!playing()||!packet||typeof packet!=="object"||Array.isArray(packet))return;
+      const state=room.lastState;
+      // Normal multiplayer is host-simulated. Its mn can differ from the room's
+      // match counter after reconnects, so validate against the host snapshot.
+      if(!state||state.end||!state.sp||typeof state.sp.key!=="string"||state.sp.left>0)return;
+      if(packet.v!==1||typeof packet.id!=="string"||!/^[a-zA-Z0-9_-]{1,80}$/.test(packet.id)||
+        !Number.isInteger(packet.mn)||packet.mn!==state.mn||typeof packet.key!=="string"||packet.key!==state.sp.key||
+        !Number.isInteger(packet.seed)||packet.seed<0||packet.seed>4294967295||
+        !Number.isInteger(packet.color)||packet.color<0||packet.color>=6||
+        !Number.isFinite(packet.at)||packet.at<0)return;
+      const position=state.pl.find(p=>p.i===player.idx);
+      if(!position||position.d||position.h<=0||!Number.isInteger(position.c)||position.c<0||position.c>=6||
+        !Number.isInteger(position.r)||position.r<0||position.r>=11)return;
+      const time=now();
+      if(!room.fireworks||room.fireworks.match!==room.match)room.fireworks={match:room.match,seen:new Set()};
+      const seen=room.fireworks.seen;
+      if(seen.has(packet.id)||(Number.isFinite(player.fireworkAt)&&time-player.fireworkAt<180)||!allowed("firework",4,2))return;
+      player.fireworkAt=time;seen.add(packet.id);
+      if(seen.size>2048)seen.delete(seen.values().next().value);
+      // The current client owns its wallet and already debits 10 stars before
+      // sending. Never charge again or broadcast its private spending popup.
+      // Keep the seed: all clients derive the same color and map destination.
+      sock.to(room.code).emit("firework",{v:1,id:packet.id,by:player.idx,mn:state.mn,key:state.sp.key,
+        seed:packet.seed,color:packet.color,c:position.c,r:position.r,at:packet.at});
+    });
     sock.on("state",s=>{
       if(!host()||!room.started||!s||typeof s!=="object"||Array.isArray(s)||!Array.isArray(s.pl)||s.pl.length>8||!s.w)return;
       if(![s.bo,s.ho,s.fr].every(a=>Array.isArray(a)&&a.length<=1024)||s.pl.some(p=>!p||!Number.isInteger(p.i)||p.i<0||p.i>7))return;
