@@ -615,7 +615,7 @@ function createWaterEscapeServer(options = {}) {
       if(packet.v!==1||typeof packet.id!=="string"||!/^[a-zA-Z0-9_-]{1,80}$/.test(packet.id)||
         !Number.isInteger(packet.mn)||packet.mn!==state.mn||typeof packet.key!=="string"||packet.key!==state.sp.key||
         !Number.isInteger(packet.seed)||packet.seed<0||packet.seed>4294967295||
-        !Number.isInteger(packet.color)||packet.color<0||packet.color>=6||
+        !Number.isInteger(packet.color)||packet.color<0||packet.color>=48||
         !Number.isFinite(packet.at)||packet.at<0)return;
       const position=state.pl.find(p=>p.i===player.idx);
       if(!position||position.d||position.h<=0||!Number.isInteger(position.c)||position.c<0||position.c>=6||
