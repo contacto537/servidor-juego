@@ -620,12 +620,19 @@ function createWaterEscapeServer(options = {}) {
       const position=state.pl.find(p=>p.i===player.idx);
       if(!position||position.d||position.h<=0||!Number.isInteger(position.c)||position.c<0||position.c>=6||
         !Number.isInteger(position.r)||position.r<0||position.r>=11)return;
-      if(!room.fireworks||room.fireworks.match!==room.match)room.fireworks={match:room.match,seen:new Set()};
-      const seen=room.fireworks.seen;
+      if(!room.fireworks||room.fireworks.match!==room.match)room.fireworks={match:room.match,seen:new Set(),shots:new Map(),introEnded:false};
+      const fireworks=room.fireworks,seen=fireworks.seen;
       if(seen.has(packet.id))return;
+      // Only the host countdown decides when unlimited intro firing ends.
+      if(!Number.isFinite(state.it)||state.it>=4)fireworks.introEnded=true;
+      if(fireworks.introEnded){
+        const time=now(),recent=(fireworks.shots.get(player.idx)||[]).filter(at=>time-at<10000);
+        if(recent.length>=3)return;
+        recent.push(time);fireworks.shots.set(player.idx,recent);
+      }
       seen.add(packet.id);
       if(seen.size>2048)seen.delete(seen.values().next().value);
-      // The current client owns its wallet and already debits 10 stars before
+      // The current client owns its wallet and already debits 3 stars before
       // sending. Never charge again or broadcast its private spending popup.
       // Keep the seed: all clients derive the same color and map destination.
       sock.to(room.code).emit("firework",{v:1,id:packet.id,by:player.idx,mn:state.mn,key:state.sp.key,
