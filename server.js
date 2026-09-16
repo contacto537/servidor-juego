@@ -620,11 +620,10 @@ function createWaterEscapeServer(options = {}) {
       const position=state.pl.find(p=>p.i===player.idx);
       if(!position||position.d||position.h<=0||!Number.isInteger(position.c)||position.c<0||position.c>=6||
         !Number.isInteger(position.r)||position.r<0||position.r>=11)return;
-      const time=now();
       if(!room.fireworks||room.fireworks.match!==room.match)room.fireworks={match:room.match,seen:new Set()};
       const seen=room.fireworks.seen;
-      if(seen.has(packet.id)||(Number.isFinite(player.fireworkAt)&&time-player.fireworkAt<180)||!allowed("firework",4,2))return;
-      player.fireworkAt=time;seen.add(packet.id);
+      if(seen.has(packet.id))return;
+      seen.add(packet.id);
       if(seen.size>2048)seen.delete(seen.values().next().value);
       // The current client owns its wallet and already debits 10 stars before
       // sending. Never charge again or broadcast its private spending popup.
