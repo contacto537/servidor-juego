@@ -304,6 +304,241 @@ function createWaterEscapeServer(options = {}) {
       { Prefer: "resolution=merge-duplicates,return=minimal" });
     dbGood(); return true;
   }
+  const WORLD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const WORLD_TTL = 600000, WORLD_CACHE_MAX = 400, WORLD_MEMBERS = 32, WORLD_MEMBER_BYTES = 60000, WORLD_DAY_MAX = 12, WORLD_IDLE_MS = 30 * 86400000;
+  const WORLDS = new Map(), WORLD_Q = new Map(), WORLD_MADE = new Map();
+  const worldCode = s => { const c = String(s == null ? "" : s).toUpperCase(); return c.length === 6 && [...c].every(ch => WORLD_ABC.includes(ch)) ? c : ""; };
+  const worldId = s => { s = typeof s === "string" ? s : ""; return /^[a-z0-9]{12,32}$/.test(s) ? s : ""; };
+  const worldSecret = s => { s = typeof s === "string" ? s : ""; return /^[A-Za-z0-9]{24,64}$/.test(s) ? s : ""; };
+  const worldName = s => String(s == null ? "" : s).replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g, "").replace(/\s+/g, " ").trim().slice(0, 16);
+  const worldHash = key => crypto.createHash("sha256").update("water-escape-world:" + key).digest("hex");
+  const worldSame = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  function worldInt(v, lo, hi) { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : null; }
+  function worldNums(raw, pattern, hi, max) {
+    const out = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    let n = 0;
+    for (const k of Object.keys(raw)) {
+      if (n >= max) break;
+      if (!pattern.test(k)) continue;
+      const v = worldInt(raw[k], 0, hi);
+      if (v) { out[k] = v; n++; }
+    }
+    return out;
+  }
+  function worldPairs(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    let n = 0;
+    for (const k of Object.keys(raw)) {
+      if (n >= 24) break;
+      const v = raw[k];
+      if (!/^\d,\d$/.test(k) || !Array.isArray(v) || v.length < 2) continue;
+      const a = worldInt(v[0], 0, 255), b = worldInt(v[1], 0, 255);
+      if (a === null || b === null) continue;
+      out[k] = [a, b]; n++;
+    }
+    return out;
+  }
+  function worldItems(raw) {
+    const out = [];
+    if (!Array.isArray(raw)) return out;
+    for (const q of raw) {
+      if (out.length >= 700) break;
+      if (!Array.isArray(q) || q.length < 3) continue;
+      const id = worldInt(q[0], 0, 4095), lx = worldInt(q[1], 0, 63), ly = worldInt(q[2], 0, 63), st = worldInt(q[3] || 0, 0, 7);
+      if (id === null || lx === null || ly === null || st === null) continue;
+      out.push([id, lx, ly, st]);
+    }
+    return out;
+  }
+  function worldHome(raw, yacht) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.x == null || raw.y == null) return null;
+    const x = worldInt(raw.x, -4000000, 4000000), y = worldInt(raw.y, -4000000, 4000000);
+    if (x === null || y === null) return null;
+    const out = { x, y };
+    if (yacht) out.type = worldInt(raw.type, 0, 7) || 0;
+    else { out.lvl = worldInt(raw.lvl, 1, 9) || 1; out.ext = worldNums(raw.ext, /^[a-z]{1,8}$/, 255, 16); }
+    out.tex = worldPairs(raw.tex); out.dark = worldNums(raw.dark, /^\d,\d$/, 255, 24); out.it = worldItems(raw.it);
+    return out;
+  }
+  function worldMember(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    return { name: lbClean(raw.name) || "Player", char: cleanId(raw.char) || "miner", base: worldHome(raw.base, false), yacht: worldHome(raw.yacht, true) };
+  }
+  function worldFromRow(row) {
+    const data = record(row.data), raw = record(data.members), used = new Set();
+    const w = { code: String(row.code || ""), name: worldName(row.name) || "World", rev: Math.max(0, Math.floor(Number(data.rev)) || 0), owner: worldId(data.owner), members: Object.create(null) };
+    for (const mid of Object.keys(raw)) {
+      const m = record(raw[mid]), n = Number(m.n);
+      if (!worldId(mid) || !Number.isInteger(n) || n < 0 || n >= WORLD_MEMBERS || used.has(n) || typeof m.kh !== "string" || !/^[0-9a-f]{64}$/.test(m.kh)) continue;
+      used.add(n);
+      w.members[mid] = { n, kh: m.kh, r: Math.max(0, Math.floor(Number(m.r)) || 0), ts: Math.max(0, Number(m.ts) || 0), ...worldMember(m) };
+    }
+    return w;
+  }
+  function worldPublic(w) {
+    const members = {};
+    for (const mid of Object.keys(w.members)) {
+      const m = w.members[mid];
+      members[mid] = { n: m.n, r: m.r, name: m.name, char: m.char, ts: m.ts, base: m.base, yacht: m.yacht };
+    }
+    return { code: w.code, name: w.name, rev: w.rev, members };
+  }
+  function worldTask(code, fn) {
+    const run = (WORLD_Q.get(code) || Promise.resolve()).then(() => fn());
+    const tail = run.then(() => {}, () => {});
+    WORLD_Q.set(code, tail);
+    tail.then(() => { if (WORLD_Q.get(code) === tail) WORLD_Q.delete(code); });
+    return run;
+  }
+  function worldCache(w, dirty) {
+    WORLDS.delete(w.code);
+    const entry = { w, at: now(), dirty: !!dirty };
+    WORLDS.set(w.code, entry);
+    if (WORLDS.size > WORLD_CACHE_MAX) {
+      for (const [code, old] of WORLDS) {
+        if (WORLDS.size <= WORLD_CACHE_MAX) break;
+        if (code !== w.code && !rooms.has(code) && !WORLD_Q.has(code) && !old.dirty) WORLDS.delete(code);
+      }
+    }
+    return entry;
+  }
+  async function worldRead(code) {
+    const hit = WORLDS.get(code);
+    if (hit && (!DB_ON || hit.dirty || rooms.has(code) || now() - hit.at < WORLD_TTL)) return hit.w;
+    if (!DB_ON) return null;
+    const result = await httpsReqFull("GET", "/rest/v1/worlds?select=code,name,data&code=eq." + code + "&limit=1", null);
+    const rows = JSON.parse(result.body || "[]");
+    if (!Array.isArray(rows)) throw new Error("Invalid worlds response");
+    dbGood();
+    if (!rows.length || !rows[0] || rows[0].code !== code) { WORLDS.delete(code); return null; }
+    return worldCache(worldFromRow(rows[0]), false).w;
+  }
+  async function worldWrite(w) {
+    w.rev++;
+    const entry = worldCache(w, DB_ON);
+    if (!DB_ON) return;
+    await httpsReqFull("POST", "/rest/v1/worlds?on_conflict=code", { code: w.code, name: w.name,
+      data: { v: 1, rev: w.rev, owner: w.owner, members: w.members }, updated_at: new Date(now()).toISOString() },
+      { Prefer: "resolution=merge-duplicates,return=minimal" });
+    entry.dirty = false; dbGood();
+  }
+  function worldSeat(w) {
+    const mids = Object.keys(w.members), used = new Set(mids.map(mid => w.members[mid].n));
+    if (mids.length >= WORLD_MEMBERS) {
+      let idle = "";
+      for (const mid of mids) {
+        const m = w.members[mid];
+        if (mid !== w.owner && now() - m.ts > WORLD_IDLE_MS && (!idle || m.ts < w.members[idle].ts)) idle = mid;
+      }
+      if (!idle) return -1;
+      used.delete(w.members[idle].n); delete w.members[idle];
+    }
+    for (let n = 0; n < WORLD_MEMBERS; n++) if (!used.has(n)) return n;
+    return -1;
+  }
+  function worldQuota(req) {
+    const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim(), day = Math.floor(now() / 86400000);
+    for (const [key, value] of WORLD_MADE) if (value.day !== day) WORLD_MADE.delete(key);
+    const q = WORLD_MADE.get(ip) || { n: 0, day };
+    if (q.n >= WORLD_DAY_MAX) return false;
+    q.n++; WORLD_MADE.set(ip, q); return true;
+  }
+  async function worldCreate(name, mid, key) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const code = Array.from({ length: 6 }, () => WORLD_ABC[crypto.randomInt(WORLD_ABC.length)]).join("");
+      const made = await worldTask(code, async () => {
+        if (rooms.has(code) || await worldRead(code)) return null;
+        const w = { code, name, rev: 0, owner: mid, members: Object.create(null) };
+        w.members[mid] = { n: 0, kh: worldHash(key), r: 1, ts: now(), name: "Player", char: "miner", base: null, yacht: null };
+        try { await worldWrite(w); } catch (e) { WORLDS.delete(code); throw e; }
+        return w;
+      });
+      if (made) return made;
+    }
+    throw new Error("No free world code");
+  }
+  function worldPut(code, mid, key, raw) {
+    return worldTask(code, async () => {
+      const w = await worldRead(code);
+      if (!w) return { status: 404, body: { ok: false, err: "NOT_FOUND" } };
+      const clean = worldMember(raw), kh = worldHash(key);
+      if (!clean) return { status: 400, body: { ok: false, err: "bad request" } };
+      if (Buffer.byteLength(JSON.stringify(clean)) > WORLD_MEMBER_BYTES) return { status: 413, body: { ok: false, err: "TOO_LARGE" } };
+      let m = w.members[mid];
+      if (m && !worldSame(m.kh, kh)) return { status: 403, body: { ok: false, err: "WRONG_KEY" } };
+      if (clean.base) for (const other of Object.keys(w.members)) {
+        const b = other === mid ? null : w.members[other].base;
+        if (b && Math.abs(b.x - clean.base.x) < 10 && Math.abs(b.y - clean.base.y) < 8) return { status: 409, body: { ok: false, err: "SITE_TAKEN" } };
+      }
+      const fresh = !m;
+      if (fresh) {
+        const n = worldSeat(w);
+        if (n < 0) return { status: 409, body: { ok: false, err: "WORLD_MEMBERS_FULL" } };
+        m = w.members[mid] = { n, kh, r: 0, ts: 0, name: "", char: "", base: null, yacht: null };
+      }
+      const same = !fresh && JSON.stringify(clean) === JSON.stringify({ name: m.name, char: m.char, base: m.base, yacht: m.yacht });
+      m.ts = now();
+      if (!same) {
+        Object.assign(m, clean); m.r = w.rev + 1;
+        await worldWrite(w);
+        const r = fresh ? rooms.get(code) : null;
+        if (r && r.world) emitLobby(r);
+      }
+      return { status: 200, body: { ok: true, rev: w.rev, n: m.n } };
+    });
+  }
+  function worldEnter(code, mid, key, who) {
+    return worldTask(code, async () => {
+      const w = await worldRead(code);
+      if (!w) return { err: "That world does not exist" };
+      const kh = worldHash(key), m = w.members[mid];
+      if (m) {
+        if (!worldSame(m.kh, kh)) return { err: "This world belongs to another save" };
+        m.ts = now(); return { w };
+      }
+      const n = worldSeat(w);
+      if (n < 0) return { err: "This world has too many members" };
+      w.members[mid] = { n, kh, r: w.rev + 1, ts: now(), name: lbClean(who.name) || "Player", char: cleanId(who.char) || "miner", base: null, yacht: null };
+      try { await worldWrite(w); } catch (e) { dbError(e); }
+      return { w };
+    });
+  }
+  async function worldHttp(req, res, u) {
+    if (req.method === "OPTIONS") { send(res,204,""); return; }
+    if (!rateIP(req,"world:",90)) { send(res,429,{ok:false,err:"slow down"}); return; }
+    try {
+      const member = u.pathname === "/world/member";
+      if (req.method === "GET" && !member) {
+        const code = worldCode(u.searchParams.get("code"));
+        if (!code) { send(res,400,{ok:false,err:"bad request"}); return; }
+        const w = await worldTask(code, () => worldRead(code));
+        if (!w) { send(res,404,{ok:false,err:"NOT_FOUND"}); return; }
+        const r = rooms.get(code);
+        send(res,200,{ok:true,world:worldPublic(w),online:r && r.world ? r.players.filter(live).length : 0,persistent:DB_ON}); return;
+      }
+      if (req.method === "POST" && !member) {
+        const b = await readBody(req,2048);
+        if (!b || typeof b !== "object" || Array.isArray(b)) { send(res,400,{ok:false,err:"bad request"}); return; }
+        const name = worldName(b.name), mid = worldId(b.mid), key = worldSecret(b.key);
+        if (!mid || !key) { send(res,400,{ok:false,err:"bad request"}); return; }
+        if (!name || isBadName(name)) { send(res,200,{ok:false,err:"name not allowed"}); return; }
+        if (!worldQuota(req)) { send(res,429,{ok:false,err:"WORLD_LIMIT"}); return; }
+        const w = await worldCreate(name,mid,key);
+        send(res,200,{ok:true,code:w.code,name:w.name,persistent:DB_ON}); return;
+      }
+      if (req.method === "PUT" || (req.method === "POST" && member)) {
+        const b = await readBody(req,200000);
+        if (!b || typeof b !== "object" || Array.isArray(b)) { send(res,400,{ok:false,err:"bad request"}); return; }
+        const code = worldCode(b.code), mid = worldId(b.mid), key = worldSecret(b.key);
+        if (!code || !mid || !key) { send(res,400,{ok:false,err:"bad request"}); return; }
+        const out = await worldPut(code,mid,key,b.member);
+        send(res,out.status,out.body); return;
+      }
+      send(res,405,{ok:false}); return;
+    } catch (e) { dbError(e); send(res,503,{ok:false,err:"WORLDS_STORAGE"}); }
+  }
   function hist(action, name, room) {
     const item = { t: new Date(now()).toISOString(), action, name, room: room || "" };
     HISTORY.push(item); if (HISTORY.length > 1000) HISTORY.shift();
@@ -317,12 +552,12 @@ function createWaterEscapeServer(options = {}) {
     res.writeHead(status, headers); res.end(typeof body === "string" ? body : JSON.stringify(body));
   }
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
-  function rateIP(req) {
-    const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  function rateIP(req, bucket = "", limit = 30) {
+    const ip = bucket + String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
 
     for (const [key, value] of LB_RATE) if (now() - value.at > 60000) LB_RATE.delete(key);
     const r = LB_RATE.get(ip) || { n: 0, at: now() }; r.n++; LB_RATE.set(ip, r);
-    return r.n <= 30;
+    return r.n <= limit;
   }
   async function handleHttp(req, res) {
     try {
@@ -412,7 +647,8 @@ function createWaterEscapeServer(options = {}) {
         }
         send(res,405,{ok:false}); return;
       }
-      if (u.pathname === "/time") { send(res,200,{t:now()}); return; }
+      if (u.pathname === "/world" || u.pathname === "/world/member") { await worldHttp(req,res,u); return; }
+      if (u.pathname === "/time") { send(res,200,{t:now(),worlds:1,cast:1}); return; }
       send(res,200,"Water Escape server OK",{"Content-Type":"text/plain; charset=utf-8"});
     } catch (e) { dbError(e); send(res,503,{ok:false,err:"temporarily unavailable"}); }
   }
@@ -437,12 +673,19 @@ function createWaterEscapeServer(options = {}) {
   function makeCode() { let code; do { code = Array.from({length:4}, () => ABC[crypto.randomInt(ABC.length)]).join(""); } while (rooms.has(code)); return code; }
   function pmap(r, participants = false) {
     return r.players.filter(p => !participants || p.inMatch).map(p => ({ idx:p.idx,pid:p.pid,name:p.name,cos:p.cos || null,char:RosterMigration.resolve(p.char),
-      team:p.team == null ? null : p.team,connected:live(p),inMatch:!!p.inMatch }));
+      team:p.team == null ? null : p.team,connected:live(p),inMatch:!!p.inMatch,...(r.world ? worldTag(r,p) : {}) }));
+  }
+  function worldTag(r,p) { const entry = WORLDS.get(r.code), m = entry && p.mid ? entry.w.members[p.mid] : null; return {mid:p.mid || "",seat:m ? m.n : -1}; }
+  function worldHost(r) {
+    if (r.players.some(p => p.id === r.hostId && live(p))) return;
+    const next = r.players.find(live);
+    r.hostId = next ? next.id : null;
+    if (next) identity(r);
   }
   function lobby(r) { return {code:r.code,players:pmap(r),started:r.started,mode:r.mode,map:r.map,teams:r.mode === "teams",match:r.match,hostConnected:r.players.some(p => p.idx === 0 && live(p))}; }
   function startPayload(r) { return {code:r.code,players:pmap(r,true),mode:r.mode,teams:r.mode === "teams",map:r.map,match:r.match}; }
-  function sessionPayload(r,p) { return {ok:true,code:r.code,idx:p.idx,host:p.idx === 0,started:r.started,mode:r.mode,map:r.map,team:p.team,match:r.match,
-    pid:p.pid,resumeToken:p.resumeToken,participant:!!p.inMatch,players:pmap(r,true),protocol:2}; }
+  function sessionPayload(r,p) { return {ok:true,code:r.code,idx:p.idx,host:r.world ? r.hostId === p.id : p.idx === 0,started:r.started,mode:r.mode,map:r.map,team:p.team,match:r.match,
+    pid:p.pid,resumeToken:p.resumeToken,participant:!!p.inMatch,players:pmap(r,true),protocol:2,...(r.world ? {world:1} : {})}; }
   function emitLobby(r) { io.to(r.code).emit("lobby",lobby(r)); }
   function identity(r) { for (const p of r.players) if (live(p)) io.to(p.id).emit("roomSession",sessionPayload(r,p)); }
   function releaseName(sid) {
@@ -467,6 +710,7 @@ function createWaterEscapeServer(options = {}) {
     emitLobby(r);
   }
   function ensureHost(r) {
+    if (r.world) { worldHost(r); return; }
     if (r.players.some(p => p.idx === 0)) return;
     const next = r.players.find(live);
     if (!next) { r.hostId = null; return; }
@@ -484,6 +728,7 @@ function createWaterEscapeServer(options = {}) {
     releaseName(p.sid);
     if (!r.players.length) { rooms.delete(r.code); return; }
     io.to(r.code).emit("left",{name:p.name,idx:p.idx,pid:p.pid});
+    if (r.world) { worldHost(r); emitLobby(r); return; }
     if (wasHost) {
       r.hostId = null;
       if (!r.players.some(live)) { r.started = false; r.lastState = null; }
@@ -510,7 +755,7 @@ function createWaterEscapeServer(options = {}) {
     function playing() { return owns() && room.started && player.inMatch && allowed("play",120,180); }
     function host() { return owns() && room.hostId === sock.id; }
     function relay(event, data) {
-      const hp = room.players.find(p => p.idx === 0);
+      const hp = room.players.find(p => room.world ? p.id === room.hostId : p.idx === 0);
       if (hp && live(hp)) io.to(room.hostId).emit(event,data);
     }
     function verifyResume(p) { return !p.requiresToken || (me && typeof me.resumeToken === "string" && me.resumeToken === p.resumeToken); }
@@ -542,7 +787,7 @@ function createWaterEscapeServer(options = {}) {
       const entry = reservation || {sid,ids:new Set()}; entry.ids.add(sock.id); names.set(key,entry);
       me={name,sid,char:RosterMigration.resolve(cleanId(data.char)),protocol:data.protocol|0,resumeToken:supplied,
         cos:data.cos&&typeof data.cos==="object"?{s:data.cos.s?1:0,w:data.cos.w?1:0,g:data.cos.g?1:0,fx:String(data.cos.fx||"").replace(/[^\w|]/g,"").slice(0,120)}:null};
-      hist("hello",name); cb({ok:true,name,protocol:2,rejoin:!!prior});
+      hist("hello",name); cb({ok:true,name,protocol:2,rejoin:!!prior,worlds:1,cast:1});
     });
     sock.on("create",cb => {
       if (typeof cb !== "function") return;
@@ -565,6 +810,30 @@ function createWaterEscapeServer(options = {}) {
       let idx=0; while(r.players.some(p=>p.idx===idx))idx++;
       addPlayer(r,idx); ensureHost(r); hist("join",me.name,code); cb(sessionPayload(r,player)); emitLobby(r);
     });
+    sock.on("world",(raw,cb) => {
+      if (typeof cb !== "function") return;
+      if (!me) { cb({ok:false,err:"Pick a nickname first"}); return; }
+      if (!allowed("world",1,6)) { cb({ok:false,err:"Please wait a moment"}); return; }
+      const data=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw:{},code=worldCode(data.code),mid=worldId(data.mid),key=worldSecret(data.key),who=me;
+      if (!code) { cb({ok:false,err:String(data.code == null ? "" : data.code).length === 6 ? "That world does not exist" : "World codes have 6 characters"}); return; }
+      if (!mid||!key) { cb({ok:false,err:"World identity missing"}); return; }
+      const inside=()=>room.world&&room.code===code&&player.mid===mid?sessionPayload(room,player):{ok:false,err:"You are already in a room"};
+      if (owns()) { cb(inside()); return; }
+      worldEnter(code,mid,key,who).then(found => {
+        if (found.err) { cb({ok:false,err:found.err}); return; }
+        if (closing||!sock.connected||me!==who) { cb({ok:false,err:"Connection changed"}); return; }
+        if (owns()) { cb(inside()); return; }
+        const prior=sessions.get(me.sid),old=prior&&rooms.get(prior.code);
+        if (old&&(!old.world||!verifyResume(prior))) { cb({ok:false,err:"Rejoin your existing room first"}); return; }
+        if (old) finalize(old,prior); else if (prior) sessions.delete(me.sid);
+        let r=rooms.get(code);
+        if (!r) { r={code,hostId:null,players:[],started:true,mode:"ffa",map:"waterescape",match:1,seq:0,lastState:null,world:true}; rooms.set(code,r); }
+        if (!r.world||r.players.length>=8) { cb({ok:false,err:"World is full (max 8)"}); return; }
+        let idx=0; while(r.players.some(p=>p.idx===idx))idx++;
+        const p=addPlayer(r,idx); p.inMatch=true; p.mid=mid;
+        worldHost(r); hist("world",me.name,code); cb(sessionPayload(r,p)); emitLobby(r);
+      }).catch(e => { dbError(e); cb({ok:false,err:"WORLDS_STORAGE"}); });
+    });
     sock.on("rejoin",cb => {
       if (typeof cb !== "function") return;
       const p=me&&sessions.get(me.sid),r=p&&rooms.get(p.code);
@@ -575,7 +844,7 @@ function createWaterEscapeServer(options = {}) {
 
       p.id=sock.id;p.ghost=false;p.char=me.char;p.cos=me.cos;
       room=r;player=p;sock.join(r.code);
-      if(p.idx===0)r.hostId=sock.id;
+      if(p.idx===0&&!r.world)r.hostId=sock.id;
       if(old&&old!==sock){old.leave(r.code);old.disconnect(true);}
       ensureHost(r);hist("rejoin",me.name,r.code);cb(sessionPayload(r,p));emitLobby(r);
       if(r.started&&p.inMatch&&p.idx!==0&&r.lastState)sock.emit("state",r.lastState);
@@ -596,11 +865,12 @@ function createWaterEscapeServer(options = {}) {
       room.players.forEach(p=>{p.again=false;p.inMatch=live(p);});
       io.to(room.code).emit("start",startPayload(room));
     });
-    sock.on("backToLobby",() => {if(host())returnLobby(room,"host_returned");});
+    sock.on("backToLobby",() => {if(host()&&!room.world)returnLobby(room,"host_returned");});
     for(const event of ["input","chain","escape"])sock.on(event,d=>{if(!playing())return;const dir=unitDir(d);if(dir)relay(event,{idx:player.idx,d:dir});});
     sock.on("tp",d=>{if(!playing()||!Array.isArray(d)||d.length!==2||!d.every(Number.isFinite))return;relay("tp",{idx:player.idx,d:[d[0]|0,d[1]|0]});});
     sock.on("aim",d=>{if(playing()&&Number.isFinite(d))relay("aim",{idx:player.idx,d:(d|0)<0?-1:1});});
     sock.on("throw",d=>{if(!playing())return;if(Array.isArray(d)&&d.length===2&&d.every(Number.isFinite))relay("throw",{idx:player.idx,d:[d[0]|0,d[1]|0]});else if(Number.isFinite(d))relay("throw",{idx:player.idx,d:d|0});});
+    sock.on("cast",d=>{if(!playing()||!Array.isArray(d)||d.length!==2||!d.every(Number.isFinite))return;sock.to(room.code).emit("cast",{idx:player.idx,d:[d[0]|0,d[1]|0]});});
     sock.on("chainArm",d=>{if(playing())relay("chainArm",{idx:player.idx,d:d?1:0});});
     sock.on("rush",()=>{if(playing())relay("rush",{idx:player.idx});});
     sock.on("emote",k=>{if(!playing()||!Number.isInteger(k)||k<0||k>6)return;relay("emote",{idx:player.idx,k});});
@@ -645,7 +915,7 @@ function createWaterEscapeServer(options = {}) {
       if(firstEnd)sock.to(room.code).emit("state",state);
       else sock.to(room.code).volatile.emit("state",state);
     });
-    sock.on("again",()=>{if(!owns()||!room.started||!player.inMatch||player.again)return;player.again=true;againCount(room);});
+    sock.on("again",()=>{if(!owns()||room.world||!room.started||!player.inMatch||player.again)return;player.again=true;againCount(room);});
     sock.on("leave",cb=>{
       if(!owns()){if(typeof cb==="function")cb({ok:true});return;}
       const r=room,p=player;room=null;player=null;
@@ -660,6 +930,7 @@ function createWaterEscapeServer(options = {}) {
       if(p.tm)cancel(p.tm);
       p.tm=later(()=>{p.tm=null;if(p.ghost)finalize(r,p);},GRACE_MS);
       if(p.tm&&p.tm.unref)p.tm.unref();
+      if(r.world)worldHost(r);
       emitLobby(r);
     });
   });
