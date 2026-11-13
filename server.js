@@ -1,7 +1,5 @@
 "use strict";
 
-// Existing rooms, authentication and Supabase endpoints are preserved.
-// Memory Run shares this HTTP listener; no extra Render service is needed.
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
@@ -139,10 +137,9 @@ function createWaterEscapeServer(options = {}) {
   const cleanName = s => String(s || "").replace(/[^\wÁÉÍÓÚÑÜáéíóúñü\- ]/g, "").trim().slice(0, 12);
   function lbClean(s) { const n = cleanName(s); return n && !isBadName(n) ? n : null; }
 
-  // These are SOLO leaderboards only. No socket event submits multiplayer scores.
-  const LB_MODES = ["normal", "rush", "memory"];
-  const LB_MAX = { normal: 5000, rush: 5000, memory: 2000 };
-  const LB_MEM = { normal: new Map(), rush: new Map(), memory: new Map() };
+  const LB_MODES = ["normal", "rush", "memory", "adventure"];
+  const LB_MAX = { normal: 5000, rush: 5000, memory: 2000, adventure: 100000000 };
+  const LB_MEM = { normal: new Map(), rush: new Map(), memory: new Map(), adventure: new Map() };
   const LB_CACHE = new Map(), LB_PENDING = new Map(), LB_REV = new Map(), LB_RATE = new Map();
   function lbInvalidate(mode) { LB_CACHE.delete(mode); LB_REV.set(mode, (LB_REV.get(mode) || 0) + 1); }
   function lbDedupe(rows) {
@@ -165,7 +162,7 @@ function createWaterEscapeServer(options = {}) {
           if (!Array.isArray(page)) throw new Error("Invalid scores response");
           rows.push(...page);
           if (page.length < 1000) break;
-          // Avoid unlimited work if a proxy ignores the pagination parameter.
+
           if (offset >= 199000) throw new Error("Leaderboard paging limit reached");
         }
         dbGood();
@@ -193,8 +190,7 @@ function createWaterEscapeServer(options = {}) {
     let best;
     if (DB_ON) {
       const query = "/rest/v1/scores?dev=eq." + encodeURIComponent(dev) + "&mode=eq." + mode;
-      // An insert cannot overwrite a concurrent record. The conditional PATCH
-      // updates the maximum atomically in Postgres, including across instances.
+
       await httpsReqFull("POST", "/rest/v1/scores?on_conflict=dev,mode", { dev, name, mode, score, t },
         { Prefer: "resolution=ignore-duplicates,return=minimal" });
       await httpsReqFull("PATCH", query + "&score=lt." + score, { name, score, t }, { Prefer: "return=minimal" });
@@ -209,7 +205,7 @@ function createWaterEscapeServer(options = {}) {
       best = LB_MEM[mode].get(dev).score;
     }
     lbInvalidate(mode);
-    // Saving succeeded even if a separate rank lookup times out.
+
     let rank = null;
     try { rank = (await lbRankName(mode, name, best)).rank; } catch (e) { dbError(e); }
     return { ok: true, best, rank, persistent: DB_ON };
@@ -255,7 +251,7 @@ function createWaterEscapeServer(options = {}) {
     for (const map of ["original","volcano","jungle"]) {
       if (!has(equipped,map)) continue;
       const id = equipped[map];
-      // null is an explicit REMOVE, not a missing selection to restore later.
+
       if (id === null || (typeof id === "string" && has(out.own,id))) out.eq[map] = id;
     }
     return out;
@@ -264,14 +260,20 @@ function createWaterEscapeServer(options = {}) {
     if (!d || typeof d !== "object" || Array.isArray(d)) return null;
     const hasThemes = Object.prototype.hasOwnProperty.call(d,"tileThemes");
     if (hasThemes && (!d.tileThemes || typeof d.tileThemes !== "object" || Array.isArray(d.tileThemes))) return null;
-    const ch = record(d.char), fx = record(d.fx), cos = record(d.cos);
+    const ch = record(d.char), fx = record(d.fx), cos = record(d.cos), adventure = progAdventure(d.adventure);
     return { v: 1, ts: now(), stars: Math.max(0, Math.min(10000000, Number(d.stars) || 0)),
       best: Math.max(0, Number(d.best) | 0), bestSoloN: Math.max(0, Number(d.bestSoloN) | 0), bestSoloR: Math.max(0, Number(d.bestSoloR) | 0),
       name: String(d.name || "").slice(0,12), nameTyped: !!d.nameTyped, soloSeen: !!d.soloSeen,
       inv: record(d.inv), char: { own: record(ch.own), sel: String(ch.sel || "miner") },
       fx: { own: record(fx.own), sel: record(fx.sel) }, cos: { own: record(cos.own), eq: record(cos.eq) },
       ...(hasThemes ? {tileThemes:progThemes(d.tileThemes)} : {}),
-      ...(Object.prototype.hasOwnProperty.call(d,"fireworkLauncher") ? progFireworks(d) : {}) };
+      ...(Object.prototype.hasOwnProperty.call(d,"fireworkLauncher") ? progFireworks(d) : {}),
+      ...(adventure ? {adventure} : {}) };
+  }
+  function progAdventure(a) {
+    if (!a || typeof a !== "object" || Array.isArray(a) || typeof a.data !== "string" || !a.data || a.data.length > 120000) return null;
+    const num = (v, max) => { v = Number(v); return Number.isFinite(v) ? Math.max(0, Math.min(max, Math.floor(v))) : 0; };
+    return { t: num(a.t, 8640000000000000), lvl: num(a.lvl, 100000), score: num(a.score, 1000000000000), data: a.data };
   }
   function progFireworks(d) {
     d = record(d);
@@ -287,16 +289,17 @@ function createWaterEscapeServer(options = {}) {
   }
   async function progPut(uid, provider, data) {
     if (!DB_ON) throw new Error("Persistent cloud storage is not configured");
-    // A permanent launcher purchase survives older clients and stale saves.
-    // Equipment follows its own timestamp, including an explicit UNEQUIP.
+
     const previous = await progGet(uid), oldFireworks = progFireworks(previous);
     const incomingFireworks = Object.prototype.hasOwnProperty.call(data,"fireworkLauncher") ? progFireworks(data) : oldFireworks;
     const equipment = incomingFireworks.fireworkEquipTs >= oldFireworks.fireworkEquipTs ? incomingFireworks : oldFireworks;
     data = {...data,...equipment,fireworkLauncher:oldFireworks.fireworkLauncher || incomingFireworks.fireworkLauncher};
-    // Older builds also retain their existing tile-theme compatibility.
+
     if (!Object.prototype.hasOwnProperty.call(data,"tileThemes")) {
       data = {...data,tileThemes:progThemes(previous && previous.tileThemes)};
     }
+    const oldAdventure = progAdventure(previous && previous.adventure);
+    if (oldAdventure && (!data.adventure || data.adventure.score < oldAdventure.score)) data = {...data,adventure:oldAdventure};
     await httpsReqFull("POST", "/rest/v1/progress?on_conflict=uid", { uid, provider, data, updated_at: new Date(now()).toISOString() },
       { Prefer: "resolution=merge-duplicates,return=minimal" });
     dbGood(); return true;
@@ -316,8 +319,7 @@ function createWaterEscapeServer(options = {}) {
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
   function rateIP(req) {
     const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
-    // The deployment proxy must replace x-forwarded-for. This is a load limit,
-    // not proof of identity or proof that a solo score was legitimately earned.
+
     for (const [key, value] of LB_RATE) if (now() - value.at > 60000) LB_RATE.delete(key);
     const r = LB_RATE.get(ip) || { n: 0, at: now() }; r.n++; LB_RATE.set(ip, r);
     return r.n <= 30;
@@ -325,8 +327,7 @@ function createWaterEscapeServer(options = {}) {
   async function handleHttp(req, res) {
     try {
       const u = new URL(req.url, "http://localhost");
-      // Delegate before generic CORS/body handling: Memory owns its native-app
-      // origin checks and private, per-player snapshots.
+
       if (u.pathname === "/api/memory" || u.pathname.startsWith("/api/memory/")) {
         if (memory) return await memory.handler(req, res);
         send(res, 503, {error:"Memory Run is temporarily unavailable. Please try again."}); return;
@@ -421,8 +422,7 @@ function createWaterEscapeServer(options = {}) {
     const createMemory = options.createMemoryService || require("./memory-service.cjs").createService;
     memory = createMemory(Object.assign({}, options.memory || {}, {env, log}));
   } catch (e) {
-    // A damaged or unavailable Memory data file must not take existing
-    // multiplayer, purchases/cloud credentials or rankings offline.
+
     log("Memory Run initialization failed:", e.message);
   }
   const srv = http.createServer(handleHttp);
@@ -471,8 +471,7 @@ function createWaterEscapeServer(options = {}) {
     const next = r.players.find(live);
     if (!next) { r.hostId = null; return; }
     next.idx = 0; r.hostId = next.id;
-    // The original game has no complete simulation transfer. A permanent host
-    // departure returns everybody to the SAME room instead of inventing a match.
+
     returnLobby(r,"host_left");
   }
   function finalize(r,p) {
@@ -573,8 +572,7 @@ function createWaterEscapeServer(options = {}) {
       if (room && room!==r) { cb({ok:false,err:"You are already in another room"}); return; }
       const old=io.sockets.sockets.get(p.id);
       if(p.tm){cancel(p.tm);p.tm=null;}
-      // Transfer ownership BEFORE closing the previous socket. Its disconnect
-      // callback then cannot mark the replacement connection as a ghost.
+
       p.id=sock.id;p.ghost=false;p.char=me.char;p.cos=me.cos;
       room=r;player=p;sock.join(r.code);
       if(p.idx===0)r.hostId=sock.id;
@@ -609,8 +607,7 @@ function createWaterEscapeServer(options = {}) {
     sock.on("firework",packet=>{
       if(!playing()||!packet||typeof packet!=="object"||Array.isArray(packet))return;
       const state=room.lastState;
-      // Normal multiplayer is host-simulated. Its mn can differ from the room's
-      // match counter after reconnects, so validate against the host snapshot.
+
       if(!state||state.end||!state.sp||typeof state.sp.key!=="string"||state.sp.left>0)return;
       if(packet.v!==1||typeof packet.id!=="string"||!/^[a-zA-Z0-9_-]{1,80}$/.test(packet.id)||
         !Number.isInteger(packet.mn)||packet.mn!==state.mn||typeof packet.key!=="string"||packet.key!==state.sp.key||
@@ -623,7 +620,7 @@ function createWaterEscapeServer(options = {}) {
       if(!room.fireworks||room.fireworks.match!==room.match)room.fireworks={match:room.match,seen:new Set(),shots:new Map(),introEnded:false};
       const fireworks=room.fireworks,seen=fireworks.seen;
       if(seen.has(packet.id))return;
-      // Only the host countdown decides when unlimited intro firing ends.
+
       if(!Number.isFinite(state.it)||state.it>=4)fireworks.introEnded=true;
       if(fireworks.introEnded){
         const time=now(),recent=(fireworks.shots.get(player.idx)||[]).filter(at=>time-at<10000);
@@ -632,9 +629,7 @@ function createWaterEscapeServer(options = {}) {
       }
       seen.add(packet.id);
       if(seen.size>2048)seen.delete(seen.values().next().value);
-      // The current client owns its wallet and already debits 3 stars before
-      // sending. Never charge again or broadcast its private spending popup.
-      // Keep the seed: all clients derive the same color and map destination.
+
       sock.to(room.code).emit("firework",{v:1,id:packet.id,by:player.idx,mn:state.mn,key:state.sp.key,
         seed:packet.seed,color:packet.color,c:position.c,r:position.r,at:packet.at});
     });
@@ -646,8 +641,7 @@ function createWaterEscapeServer(options = {}) {
       if(!allowed("state",60,90))return;
       const firstEnd=!!s.end&&!room.lastState?.end;
       const state={...s,room:room.code,match:room.match,seq:++room.seq};room.lastState=state;
-      // Replaceable snapshots must not pile up behind a slow mobile connection.
-      // The first final result remains reliable; cumulative awards stay in state.
+
       if(firstEnd)sock.to(room.code).emit("state",state);
       else sock.to(room.code).volatile.emit("state",state);
     });
